@@ -1,0 +1,17 @@
+# Local secrets (never commit)
+config_local.py
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.Python
+*.egg-info/
+.egg/
+
+# Cache and local data
+cache/
+
+# Optional
+.env
+*.log
