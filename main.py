@@ -374,13 +374,21 @@ class Application:
         search_frame.pack(fill=tk.X, pady=(0, 4))
         ttk.Label(search_frame, text="Search game:").pack(side=tk.LEFT, padx=(0, 6))
         self.tab2_search_var = tk.StringVar(value="")
-        search_entry = ttk.Entry(search_frame, textvariable=self.tab2_search_var, width=40)
-        search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
+        search_entry = ttk.Entry(search_frame, textvariable=self.tab2_search_var, width=22)
+        search_entry.pack(side=tk.LEFT, padx=(0, 8))
 
-        # Filters
-        ttk.Label(tab2, text="Filters:").pack(anchor=tk.W, pady=(8, 4))
-        filt_frame = ttk.Frame(tab2)
-        filt_frame.pack(fill=tk.X)
+        # Filters (collapsible)
+        self._filters_visible = True
+        filters_outer = ttk.Frame(tab2)
+        filters_outer.pack(fill=tk.X, pady=(8, 0))
+        filters_header = ttk.Frame(filters_outer)
+        filters_header.pack(fill=tk.X)
+        ttk.Label(filters_header, text="Filters:").pack(side=tk.LEFT, padx=(0, 8))
+        self.tab2_filters_toggle_btn = ttk.Button(filters_header, text="Hide filters \u25BC", width=14, command=self._toggle_filters_tab2)
+        self.tab2_filters_toggle_btn.pack(side=tk.LEFT)
+        filt_frame = ttk.Frame(filters_outer)
+        filt_frame.pack(fill=tk.X, pady=(4, 0))
+        self.tab2_filt_frame = filt_frame
         ttk.Label(filt_frame, text="Score:").grid(row=0, column=0, sticky=tk.W, padx=(0, 4))
         self.score_filter_type = tk.StringVar(value="All")
         score_combo = ttk.Combobox(filt_frame, textvariable=self.score_filter_type, width=12, state="readonly")
@@ -495,6 +503,17 @@ class Application:
             messagebox.showerror("Error", f"Failed:\n{e}")
             self.tab2_status.config(text="")
             self._on_sale_rows = []
+
+    def _toggle_filters_tab2(self):
+        """Show or hide the filter controls to free space for the results list."""
+        if self._filters_visible:
+            self.tab2_filt_frame.pack_forget()
+            self._filters_visible = False
+            self.tab2_filters_toggle_btn.config(text="Show filters \u25B6")
+        else:
+            self.tab2_filt_frame.pack(fill=tk.X, pady=(4, 0))
+            self._filters_visible = True
+            self.tab2_filters_toggle_btn.config(text="Hide filters \u25BC")
 
     def _apply_filters_tab2(self):
         score_type = self.score_filter_type.get()
