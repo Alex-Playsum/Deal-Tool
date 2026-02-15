@@ -6,7 +6,7 @@ import webbrowser
 from datetime import datetime, timezone
 
 import tkinter as tk
-from tkinter import ttk, scrolledtext, messagebox
+from tkinter import ttk, scrolledtext, messagebox, filedialog
 
 from config import (
     ALL_CURRENCIES,
@@ -29,7 +29,7 @@ from on_sale import (
 )
 from tksheet import Sheet
 from steam_cache import clear as clear_steam_cache
-from steam_app_list import clear_app_list_cache
+from steam_app_list import clear_app_list_cache, clear_name_resolution_cache
 from steam_appdetails_cache import clear as clear_steam_appdetails_cache
 
 
@@ -376,6 +376,7 @@ class Application:
         self.tab2_search_var = tk.StringVar(value="")
         search_entry = ttk.Entry(search_frame, textvariable=self.tab2_search_var, width=22)
         search_entry.pack(side=tk.LEFT, padx=(0, 8))
+        search_entry.bind("<Return>", lambda e: self._apply_filters_tab2())
 
         # Filters (collapsible)
         self._filters_visible = True
@@ -456,8 +457,10 @@ class Application:
         self.tab2_sheet_frame.bind("<Configure>", self._resize_tab2_columns)
         self.root.after(100, self._resize_tab2_columns)
         ttk.Label(tab2, text="Double-click a row to open the product page.", font=("TkDefaultFont", 8)).pack(anchor=tk.W)
-        copy_btn = ttk.Button(tab2, text="Copy product URLs to clipboard", command=self._copy_tab2_urls)
-        copy_btn.pack(anchor=tk.W)
+        btn_frame = ttk.Frame(tab2)
+        btn_frame.pack(anchor=tk.W)
+        ttk.Button(btn_frame, text="Copy product URLs to clipboard", command=self._copy_tab2_urls).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(btn_frame, text="Export to Excel…", command=self._export_tab2_to_xlsx).pack(side=tk.LEFT)
 
     def _get_selected_currencies(self) -> list[str]:
         return [c for c in ALL_CURRENCIES if self.currency_vars[c].get()]
@@ -640,11 +643,87 @@ class Application:
         else:
             messagebox.showwarning("Nothing to copy", "Fetch on-sale list first.")
 
+    def _export_tab2_to_xlsx(self):
+        from openpyxl import Workbook
+        from openpyxl.styles import PatternFill
+
+        rows = getattr(self, "_tab2_displayed_rows", None) or []
+        if not rows:
+            messagebox.showwarning("Nothing to export", "Fetch on-sale list and apply filters first.")
+            return
+        path = filedialog.asksaveasfilename(
+            defaultextension=".xlsx",
+            filetypes=[("Excel workbook", "*.xlsx")],
+        )
+        if not path:
+            return
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Deal Finder"
+        headers = ["Game", "Rating", "Reviews", "% Off", "Release date", "Sale end"]
+        for col, h in enumerate(headers, start=1):
+            ws.cell(row=1, column=col, value=h)
+
+        rating_vals, review_vals, discount_vals = [], [], []
+        data_rows = []
+        for r in rows:
+            title = (r.get("title") or "").strip() or "—"
+            pct = r.get("steam_percent_positive")
+            desc = r.get("steam_review_desc") or ""
+            if pct is not None and desc:
+                rating = f"{desc} ({pct}%)"
+            elif desc:
+                rating = desc
+            elif pct is not None:
+                rating = f"{pct}%"
+            else:
+                rating = "N/A"
+            reviews = r.get("steam_total_reviews")
+            reviews_str = str(reviews) if reviews is not None and reviews > 0 else "N/A"
+            discount_str = _discount_str(r)
+            release_str = _release_date_str(r)
+            sale_end_str = _sale_end_str(r)
+            data_rows.append([title, rating, reviews_str, discount_str, release_str, sale_end_str])
+            rating_vals.append(float(pct) if pct is not None else None)
+            rev = r.get("steam_total_reviews")
+            review_vals.append(math.log10(max(1, rev)) if rev and rev > 0 else None)
+            discount_vals.append(float(_discount_pct(r)) if _discount_pct(r) is not None else None)
+
+        for i, row_data in enumerate(data_rows):
+            excel_row = i + 2
+            for col, val in enumerate(row_data, start=1):
+                cell = ws.cell(row=excel_row, column=col, value=val)
+                row_fill = "FFFFFF" if (i % 2) == 0 else "F0F4F8"
+                cell.fill = PatternFill(start_color=row_fill, end_color=row_fill, fill_type="solid")
+
+        n = len(rows)
+        for col_idx, vals in enumerate([rating_vals, review_vals, discount_vals]):
+            numeric = [v for v in vals if v is not None]
+            if not numeric:
+                continue
+            lo, hi = min(numeric), max(numeric)
+            span = hi - lo if hi > lo else 1.0
+            excel_col = col_idx + 2
+            for r in range(n):
+                v = vals[r]
+                if v is None:
+                    continue
+                t = (v - lo) / span
+                color = self._value_to_color(t).lstrip("#")
+                ws.cell(row=r + 2, column=excel_col).fill = PatternFill(
+                    start_color=color, end_color=color, fill_type="solid"
+                )
+
+        wb.save(path)
+        messagebox.showinfo("Exported", f"Saved to {path}")
+
     def _clear_steam_cache(self):
         clear_steam_cache()
         clear_app_list_cache()
         clear_steam_appdetails_cache()
-        messagebox.showinfo("Cache cleared", "Steam review, app list, and appdetails caches cleared.")
+        clear_name_resolution_cache()
+        messagebox.showinfo("Cache cleared", "Steam review, app list, appdetails, and name-resolution caches cleared.")
 
     def _build_table(self):
         if self._index is None:

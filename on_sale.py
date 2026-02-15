@@ -3,7 +3,7 @@
 from datetime import datetime
 
 from config import STEAM_WEB_API_KEY
-from steam_app_list import get_app_list, resolve_name_to_app_id
+from steam_app_list import get_app_list, resolve_name_to_app_id_cached
 from steam_client import fetch_app_reviews, fetch_app_details
 
 
@@ -93,7 +93,7 @@ def get_on_sale_products(index: dict[str, dict], resolve_steam_by_name: bool = T
         title = (p.get("title") or "").strip()
         if not title:
             continue
-        app_id = resolve_name_to_app_id(title, app_list)
+        app_id = resolve_name_to_app_id_cached(title, app_list)
         if app_id is not None:
             p["steam_app_id"] = app_id
     return on_sale

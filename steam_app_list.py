@@ -13,6 +13,7 @@ from config import (
     STEAM_APP_LIST_PAGE_SIZE,
     STEAM_APP_LIST_TTL_HOURS,
     STEAM_APP_LIST_URL,
+    STEAM_NAME_RESOLUTION_CACHE_PATH,
     STEAM_WEB_API_KEY,
 )
 
@@ -117,6 +118,29 @@ def get_app_list(force_refresh: bool = False) -> list[dict]:
         return apps  # Return existing cache on error
 
 
+def _load_resolution_cache() -> dict[str, int]:
+    """Load name->appid resolution cache from disk. Returns dict normalized_title -> app_id."""
+    if not os.path.isfile(STEAM_NAME_RESOLUTION_CACHE_PATH):
+        return {}
+    try:
+        with open(STEAM_NAME_RESOLUTION_CACHE_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return {}
+        return {k: int(v) for k, v in data.items() if v is not None and isinstance(v, (int, str)) and str(v).isdigit()}
+    except (json.JSONDecodeError, OSError, ValueError):
+        return {}
+
+
+def _save_resolution_cache(cache: dict[str, int]) -> None:
+    """Write name->appid resolution cache to disk."""
+    dirpath = os.path.dirname(STEAM_NAME_RESOLUTION_CACHE_PATH)
+    if dirpath and not os.path.isdir(dirpath):
+        os.makedirs(dirpath, exist_ok=True)
+    with open(STEAM_NAME_RESOLUTION_CACHE_PATH, "w", encoding="utf-8") as f:
+        json.dump(cache, f, indent=0)
+
+
 def _normalize_title(title: str) -> str:
     """Normalize for matching: lowercase, collapse spaces, remove some punctuation."""
     if not title:
@@ -167,7 +191,31 @@ def resolve_name_to_app_id(title: str, app_list: list[dict] | None = None) -> in
     return None
 
 
+def resolve_name_to_app_id_cached(title: str, app_list: list[dict] | None = None) -> int | None:
+    """
+    Resolve product title to Steam app_id using the app list, with disk cache.
+    Checks the name-resolution cache first; on miss, calls resolve_name_to_app_id and saves the result.
+    """
+    norm = _normalize_title(title)
+    if not norm:
+        return None
+    cache = _load_resolution_cache()
+    if norm in cache:
+        return cache[norm]
+    app_id = resolve_name_to_app_id(title, app_list)
+    if app_id is not None:
+        cache[norm] = app_id
+        _save_resolution_cache(cache)
+    return app_id
+
+
 def clear_app_list_cache() -> None:
     """Remove cached app list from disk."""
     if os.path.isfile(STEAM_APP_LIST_CACHE_PATH):
         os.remove(STEAM_APP_LIST_CACHE_PATH)
+
+
+def clear_name_resolution_cache() -> None:
+    """Remove name->appid resolution cache from disk."""
+    if os.path.isfile(STEAM_NAME_RESOLUTION_CACHE_PATH):
+        os.remove(STEAM_NAME_RESOLUTION_CACHE_PATH)

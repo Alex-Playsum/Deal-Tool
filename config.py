@@ -62,6 +62,9 @@ FEED_STEAM_APP_ID_TAG = ""
 # Optional mapping file: product URL or product UUID -> Steam App ID. Missing file = no mapping.
 STEAM_MAPPING_PATH = os.path.join(_APP_DIR, "steam_app_ids.json")
 
+# Dedicated cache for name->appid resolution (normalized title -> app_id). Avoids re-resolving same games.
+STEAM_NAME_RESOLUTION_CACHE_PATH = os.path.join(_APP_DIR, "cache", "steam_name_resolution_cache.json")
+
 # Steam review score labels -> minimum percent positive (for filter dropdown)
 STEAM_LABEL_MIN_PERCENT = {
     "Overwhelmingly Positive": 95,
