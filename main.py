@@ -240,6 +240,78 @@ def _apply_sale_end_filter(
     return rows
 
 
+def _release_date_ms(row: dict) -> int | None:
+    """Parse steam_release_date (e.g. 'Aug 21, 2012') to start-of-day UTC ms, or None."""
+    s = (row.get("steam_release_date") or "").strip()
+    if not s or s == "—":
+        return None
+    for fmt in ("%b %d, %Y", "%B %d, %Y", "%Y-%m-%d", "%d %b %Y", "%d %B %Y"):
+        try:
+            dt = datetime.strptime(s, fmt)
+            ts = datetime(dt.year, dt.month, dt.day, 0, 0, 0, 0, tzinfo=timezone.utc).timestamp()
+            return int(ts * 1000)
+        except (ValueError, TypeError):
+            continue
+    return None
+
+
+def _apply_game_search_filter(rows: list[dict], query: str) -> list[dict]:
+    """Filter rows by game title containing query (case-insensitive). Empty query = no filter."""
+    q = (query or "").strip().lower()
+    if not q:
+        return rows
+    return [r for r in rows if q in ((r.get("title") or "").strip().lower())]
+
+
+def _apply_release_date_filter(
+    rows: list[dict],
+    filter_type: str,
+    value_str: str,
+) -> list[dict]:
+    """Filter/sort by release date. filter_type: All, Newest, Oldest, By date."""
+    if not filter_type or filter_type == "All":
+        return rows
+    if filter_type == "Newest":
+        return sorted(rows, key=lambda r: (_release_date_ms(r) is None, -(_release_date_ms(r) or 0)))
+    if filter_type == "Oldest":
+        return sorted(rows, key=lambda r: (_release_date_ms(r) is None, _release_date_ms(r) or 0))
+    if filter_type == "By date":
+        mode, a, b = _parse_sale_end_value(value_str)
+        if mode == "":
+            return rows
+        if mode == "op":
+            op_match = re.match(r"^(>=?|<=?|==?|!=)\s*(\d{4}-\d{2}-\d{2})$", (value_str or "").strip())
+            if not op_match:
+                return rows
+            op, date_str = op_match.group(1), op_match.group(2)
+            start_ms = _date_str_to_start_of_day_ms(date_str)
+            if start_ms is None:
+                return rows
+            end_ms = start_ms + _ONE_DAY_MS - 1
+            next_day_ms = start_ms + _ONE_DAY_MS
+
+            def ok(row):
+                ms = _release_date_ms(row)
+                if ms is None:
+                    return False
+                if op == "<": return ms < start_ms
+                if op == "<=": return ms <= end_ms
+                if op == ">": return ms >= next_day_ms
+                if op == ">=": return ms >= start_ms
+                if op == "==": return start_ms <= ms <= end_ms
+                if op == "!=": return not (start_ms <= ms <= end_ms)
+                return False
+            return [r for r in rows if ok(r)]
+        if mode == "range":
+            def ok(row):
+                ms = _release_date_ms(row)
+                if ms is None:
+                    return False
+                return a <= ms <= b
+            return [r for r in rows if ok(r)]
+    return rows
+
+
 class Application:
     def __init__(self):
         self.root = tk.Tk()
@@ -297,6 +369,14 @@ class Application:
         self.tab2_status = ttk.Label(tab2, text="")
         self.tab2_status.pack(anchor=tk.W, pady=(0, 8))
 
+        # Search
+        search_frame = ttk.Frame(tab2)
+        search_frame.pack(fill=tk.X, pady=(0, 4))
+        ttk.Label(search_frame, text="Search game:").pack(side=tk.LEFT, padx=(0, 6))
+        self.tab2_search_var = tk.StringVar(value="")
+        search_entry = ttk.Entry(search_frame, textvariable=self.tab2_search_var, width=40)
+        search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
+
         # Filters
         ttk.Label(tab2, text="Filters:").pack(anchor=tk.W, pady=(8, 4))
         filt_frame = ttk.Frame(tab2)
@@ -331,6 +411,16 @@ class Application:
         self.sale_end_filter_value = tk.StringVar(value="")
         ttk.Entry(filt_frame, textvariable=self.sale_end_filter_value, width=28).grid(row=1, column=2, columnspan=2, sticky=tk.W, padx=(0, 4), pady=(8, 0))
         ttk.Label(filt_frame, text="(e.g. <2026-03-01 or 2026-02-01..2026-02-28)").grid(row=1, column=4, columnspan=6, sticky=tk.W, padx=(0, 8), pady=(8, 0))
+
+        # Release date filter (row 2)
+        ttk.Label(filt_frame, text="Release date:").grid(row=2, column=0, sticky=tk.W, padx=(0, 4), pady=(8, 0))
+        self.release_date_filter_type = tk.StringVar(value="All")
+        release_date_combo = ttk.Combobox(filt_frame, textvariable=self.release_date_filter_type, width=14, state="readonly")
+        release_date_combo["values"] = ("All", "Newest", "Oldest", "By date")
+        release_date_combo.grid(row=2, column=1, sticky=tk.W, padx=(0, 8), pady=(8, 0))
+        self.release_date_filter_value = tk.StringVar(value="")
+        ttk.Entry(filt_frame, textvariable=self.release_date_filter_value, width=28).grid(row=2, column=2, columnspan=2, sticky=tk.W, padx=(0, 4), pady=(8, 0))
+        ttk.Label(filt_frame, text="(e.g. >=2020-01-01 or 2018-01-01..2022-12-31)").grid(row=2, column=4, columnspan=6, sticky=tk.W, padx=(0, 8), pady=(8, 0))
 
         ttk.Label(tab2, text="Results (best rating first):").pack(anchor=tk.W, pady=(8, 4))
         self.tab2_sheet_frame = ttk.Frame(tab2)
@@ -414,10 +504,15 @@ class Application:
         discount_val = self.discount_filter_var.get()
         sale_end_type = self.sale_end_filter_type.get()
         sale_end_val = self.sale_end_filter_value.get()
+        search_query = self.tab2_search_var.get()
+        release_date_type = self.release_date_filter_type.get()
+        release_date_val = self.release_date_filter_value.get()
         rows = _apply_score_filter(self._on_sale_rows, score_type, score_val, label_val)
         rows = _apply_reviews_filter(rows, min_rev)
         rows = _apply_discount_filter(rows, discount_val)
         rows = _apply_sale_end_filter(rows, sale_end_type, sale_end_val)
+        rows = _apply_game_search_filter(rows, search_query)
+        rows = _apply_release_date_filter(rows, release_date_type, release_date_val)
         self._populate_tab2_sheet(rows)
 
     def _resize_tab2_columns(self, event=None):
