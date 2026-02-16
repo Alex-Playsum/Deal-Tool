@@ -196,6 +196,7 @@ def _render_deal_list(
     image_source = (cfg.get("image_source") or "feed").strip() or "feed"
     capsule_size = (cfg.get("capsule_size") or "header").strip() or "header"
     section_title = (cfg.get("section_title") or "").strip()
+    show_titles = cfg.get("show_titles", True)
     currency = options.get("currency") or "USD"
     show_price = options.get("show_price", True)
     show_both = options.get("show_both", False)
@@ -216,10 +217,11 @@ def _render_deal_list(
         if img_url:
             img_html = f'<a href="{html_module.escape(link)}"><img src="{html_module.escape(img_url)}" alt="{html_module.escape(title)}" style="width:100%;max-width:260px;height:auto;display:block;border:0;" /></a>' if link else f'<img src="{html_module.escape(img_url)}" alt="{html_module.escape(title)}" style="width:100%;max-width:260px;height:auto;display:block;border:0;" />'
         title_html = f'<a href="{html_module.escape(link)}" style="color:{LINK_COLOR};text-decoration:none;font-weight:bold;font-size:14px;">{html_module.escape(title)}</a>' if link else f'<span style="color:{TEXT_PRIMARY};font-weight:bold;font-size:14px;">{html_module.escape(title)}</span>'
+        title_block = f'<div style="margin-bottom:4px;">{title_html}</div>' if show_titles else ""
         cells.append(
             f'<td style="{cell_style}">'
             f'<div style="margin-bottom:6px;">{img_html}</div>'
-            f'<div style="margin-bottom:4px;">{title_html}</div>'
+            f'{title_block}'
             f'<div>{pricing_html}</div>'
             "</td>"
         )
@@ -253,6 +255,7 @@ def _render_featured(
     cfg = block.get("config") or {}
     image_source = (cfg.get("image_source") or "feed").strip() or "feed"
     capsule_size = (cfg.get("capsule_size") or "header").strip() or "header"
+    show_titles = cfg.get("show_titles", True)
     description = (cfg.get("description") or "").strip() or (game.get("short_description") or "").strip()
     offer_ends = (cfg.get("offer_ends") or "").strip() or (game.get("sale_end_display") or "").strip()
     currency = options.get("currency") or "USD"
@@ -268,13 +271,14 @@ def _render_featured(
     if img_url:
         img_html = f'<a href="{html_module.escape(link)}"><img src="{html_module.escape(img_url)}" alt="{html_module.escape(title)}" style="width:100%;max-width:100%;height:auto;display:block;border:0;" /></a>' if link else f'<img src="{html_module.escape(img_url)}" alt="{html_module.escape(title)}" style="width:100%;max-width:100%;height:auto;display:block;border:0;" />'
     title_html = f'<a href="{html_module.escape(link)}" style="color:{LINK_COLOR};text-decoration:none;font-size:20px;font-weight:bold;">{html_module.escape(title)}</a>' if link else f'<span style="color:{TEXT_PRIMARY};font-size:20px;font-weight:bold;">{html_module.escape(title)}</span>'
+    title_block = f'<div style="margin-bottom:6px;">{title_html}</div>' if show_titles else ""
     offer_html = f'<p style="margin:0 0 8px 0;font-size:12px;color:{TEXT_SECONDARY};">{html_module.escape(offer_ends)}</p>' if offer_ends else ""
     desc_html = f'<p style="margin:8px 0 0 0;font-size:14px;line-height:1.5;color:{TEXT_PRIMARY};">{html_module.escape(description)}</p>' if description else ""
     return f'''
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="{_block_wrapper_style()}">
   <tr><td style="{_block_cell_style()}padding-top:0;">
     <div style="margin-bottom:12px;">{img_html}</div>
-    <div style="margin-bottom:6px;">{title_html}</div>
+    {title_block}
     <div style="margin-bottom:6px;">{pricing_html}</div>
     {offer_html}
     {desc_html}

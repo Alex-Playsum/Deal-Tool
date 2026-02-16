@@ -4,6 +4,7 @@ import math
 import re
 import webbrowser
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox, filedialog
@@ -39,6 +40,18 @@ from steam_app_list import clear_app_list_cache, clear_name_resolution_cache
 from steam_appdetails_cache import clear as clear_steam_appdetails_cache
 from email_html import build_email_html
 from steam_client import fetch_app_details_full
+
+
+def _format_offer_ends_est(ms: int | None) -> str:
+    """Format Unix ms (UTC) as EST date and time, e.g. 'Feb 20, 2026 11:59 PM EST'."""
+    if ms is None:
+        return ""
+    try:
+        est = ZoneInfo("America/New_York")
+        dt = datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc).astimezone(est)
+        return dt.strftime("%b %d, %Y %I:%M %p EST")
+    except (ValueError, OSError):
+        return ""
 
 
 def _lerp_hex(hex_a: str, hex_b: str, t: float) -> str:
@@ -349,14 +362,14 @@ class Application:
         ttk.Radiobutton(disp_frame, text="Price", variable=self.email_show_var, value="price").grid(row=0, column=1, sticky=tk.W, padx=(0, 12))
         ttk.Radiobutton(disp_frame, text="Discount %", variable=self.email_show_var, value="discount").grid(row=0, column=2, sticky=tk.W, padx=(0, 12))
         ttk.Radiobutton(disp_frame, text="Both", variable=self.email_show_var, value="both").grid(row=0, column=3, sticky=tk.W, padx=(0, 16))
-        ttk.Label(disp_frame, text="Currency:").grid(row=0, column=3, sticky=tk.W, padx=(0, 4))
+        ttk.Label(disp_frame, text="Currency:").grid(row=0, column=4, sticky=tk.W, padx=(0, 4))
         self.email_currency_var = tk.StringVar(value="USD")
         curr_combo = ttk.Combobox(disp_frame, textvariable=self.email_currency_var, width=10, state="readonly")
         curr_combo["values"] = tuple(ALL_CURRENCIES)
-        curr_combo.grid(row=0, column=4, sticky=tk.W, padx=(0, 16))
-        ttk.Label(disp_frame, text="Coupon % off:").grid(row=0, column=5, sticky=tk.W, padx=(0, 4))
+        curr_combo.grid(row=0, column=5, sticky=tk.W, padx=(0, 16))
+        ttk.Label(disp_frame, text="Coupon % off:").grid(row=0, column=6, sticky=tk.W, padx=(0, 4))
         self.email_coupon_var = tk.StringVar(value="0")
-        ttk.Spinbox(disp_frame, from_=0, to=50, width=5, textvariable=self.email_coupon_var).grid(row=0, column=6, sticky=tk.W)
+        ttk.Spinbox(disp_frame, from_=0, to=50, width=5, textvariable=self.email_coupon_var).grid(row=0, column=7, sticky=tk.W)
 
         # Block list
         ttk.Label(tab3, text="Blocks (order):").pack(anchor=tk.W, pady=(8, 4))
@@ -422,9 +435,9 @@ class Application:
     def _email_do_add_block(self, btype: str):
         block = {"type": btype, "config": {}}
         if btype == "deal_list":
-            block["config"] = {"games_count": 4, "image_source": "feed", "capsule_size": "header"}
+            block["config"] = {"games_count": 4, "image_source": "feed", "capsule_size": "header", "show_titles": True}
         elif btype == "featured":
-            block["config"] = {"image_source": "feed", "capsule_size": "header"}
+            block["config"] = {"image_source": "feed", "capsule_size": "header", "show_titles": True}
         elif btype == "game_screenshots":
             block["config"] = {}
         elif btype == "button":
@@ -513,6 +526,8 @@ class Application:
             entries["capsule_size"]["values"] = ("header", "capsule_sm", "capsule_md", "capsule_616x353")
             entries["capsule_size"].set(cfg.get("capsule_size") or "header")
             entries["capsule_size"].grid(row=4, column=1, sticky=tk.W, pady=2, padx=(8, 0))
+            entries["show_titles"] = tk.BooleanVar(value=cfg.get("show_titles", True))
+            ttk.Checkbutton(f, text="Show game titles", variable=entries["show_titles"]).grid(row=5, column=1, sticky=tk.W, padx=(8, 0))
         elif btype == "featured":
             ttk.Label(f, text="Description:").grid(row=0, column=0, sticky=tk.W, pady=2)
             entries["description"] = scrolledtext.ScrolledText(f, width=40, height=4, wrap=tk.WORD)
@@ -530,6 +545,8 @@ class Application:
             entries["capsule_size"]["values"] = ("header", "capsule_sm", "capsule_md", "capsule_616x353")
             entries["capsule_size"].set(cfg.get("capsule_size") or "header")
             entries["capsule_size"].grid(row=4, column=1, sticky=tk.W, padx=(8, 0))
+            entries["show_titles"] = tk.BooleanVar(value=cfg.get("show_titles", True))
+            ttk.Checkbutton(f, text="Show game titles", variable=entries["show_titles"]).grid(row=5, column=1, sticky=tk.W, padx=(8, 0))
         elif btype == "text":
             ttk.Label(f, text="Content (HTML allowed):").grid(row=0, column=0, sticky=tk.NW, pady=2)
             entries["content"] = scrolledtext.ScrolledText(f, width=50, height=6, wrap=tk.WORD)
@@ -606,11 +623,13 @@ class Application:
                 new_cfg["section_title"] = entries["section_title"].get().strip()
                 new_cfg["image_source"] = entries["image_source"].get().strip() or "feed"
                 new_cfg["capsule_size"] = entries["capsule_size"].get().strip() or "header"
+                new_cfg["show_titles"] = entries["show_titles"].get()
             elif btype == "featured":
                 new_cfg["description"] = entries["description"].get("1.0", tk.END).strip()
                 new_cfg["offer_ends"] = entries["offer_ends"].get().strip()
                 new_cfg["image_source"] = entries["image_source"].get().strip() or "feed"
                 new_cfg["capsule_size"] = entries["capsule_size"].get().strip() or "header"
+                new_cfg["show_titles"] = entries["show_titles"].get()
             elif btype == "text":
                 new_cfg["content"] = entries["content"].get("1.0", tk.END).strip()
             elif btype == "picture":
@@ -673,10 +692,11 @@ class Application:
         self.root.update()
         try:
             pool = self._email_get_game_pool()
-            # Enrich: sale_end_display for all; short_description for featured games
+            # Enrich: sale_end_display for all (date + time EST); short_description for featured games
             for p in pool:
-                end_str = _sale_end_str(p)
-                p["sale_end_display"] = ("Offer ends " + end_str) if end_str and end_str != "—" else ""
+                end_ms = _sale_end_ms(p)
+                end_formatted = _format_offer_ends_est(end_ms)
+                p["sale_end_display"] = ("Offer ends " + end_formatted) if end_formatted else ""
             try:
                 featured_count = max(0, min(len(pool), int(self.email_featured_var.get().strip() or 0)))
             except ValueError:
