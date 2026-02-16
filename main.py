@@ -15,6 +15,12 @@ from config import (
     STEAM_LABEL_MIN_PERCENT,
     STEAM_LABEL_ORDER,
 )
+from deal_filters import (
+    apply_deal_filters,
+    date_str_to_start_of_day_ms,
+    ONE_DAY_MS,
+    parse_sale_end_value,
+)
 from feed_client import fetch_and_parse
 from product_index import items_to_index, resolve_urls_to_products
 from table_builder import build_reddit_table
@@ -31,6 +37,8 @@ from tksheet import Sheet
 from steam_cache import clear as clear_steam_cache
 from steam_app_list import clear_app_list_cache, clear_name_resolution_cache
 from steam_appdetails_cache import clear as clear_steam_appdetails_cache
+from email_html import build_email_html
+from steam_client import fetch_app_details_full
 
 
 def _lerp_hex(hex_a: str, hex_b: str, t: float) -> str:
@@ -53,191 +61,6 @@ def parse_pasted_urls(text: str) -> list[str]:
         if u:
             urls.append(u)
     return urls
-
-
-def _apply_score_filter(rows: list[dict], filter_type: str, score_value: str, label_value: str) -> list[dict]:
-    """Filter rows by score: All, Exact %, Operator (e.g. >75), or Label."""
-    if filter_type == "All" or not filter_type:
-        return rows
-    if filter_type == "Exact %":
-        try:
-            target = int(score_value.strip())
-        except (ValueError, TypeError):
-            return rows
-        return [r for r in rows if r.get("steam_percent_positive") is not None and abs(r["steam_percent_positive"] - target) <= 1]
-    if filter_type == "Operator":
-        s = (score_value or "").strip()
-        m = re.match(r"^(>=?|<=?|==?|!=)\s*(\d+)$", s)
-        if not m:
-            return rows
-        op, num = m.group(1), int(m.group(2))
-        def ok(pct):
-            if pct is None:
-                return False
-            if op == ">": return pct > num
-            if op == ">=": return pct >= num
-            if op == "<": return pct < num
-            if op == "<=": return pct <= num
-            if op == "==": return pct == num
-            if op == "!=": return pct != num
-            return False
-        return [r for r in rows if ok(r.get("steam_percent_positive"))]
-    if filter_type == "Label" and label_value:
-        min_pct = STEAM_LABEL_MIN_PERCENT.get(label_value)
-        if min_pct is None:
-            return rows
-        return [r for r in rows if r.get("steam_percent_positive") is not None and r["steam_percent_positive"] >= min_pct and (r.get("steam_review_desc") or "") == label_value]
-    return rows
-
-
-def _apply_reviews_filter(rows: list[dict], min_reviews: str) -> list[dict]:
-    """Filter rows by minimum total reviews."""
-    try:
-        n = int((min_reviews or "").strip())
-    except (ValueError, TypeError):
-        return rows
-    if n <= 0:
-        return rows
-    return [r for r in rows if (r.get("steam_total_reviews") or 0) >= n]
-
-
-def _apply_discount_filter(rows: list[dict], value_str: str) -> list[dict]:
-    """Filter rows by discount %: operator + number (e.g. >50, >=30). Empty = no filter."""
-    s = (value_str or "").strip()
-    if not s:
-        return rows
-    m = re.match(r"^(>=?|<=?|==?|!=)\s*(\d+)$", s)
-    if not m:
-        return rows
-    op, num = m.group(1), int(m.group(2))
-
-    def ok(row):
-        pct = _discount_pct(row)
-        if pct is None:
-            return False
-        if op == ">":
-            return pct > num
-        if op == ">=":
-            return pct >= num
-        if op == "<":
-            return pct < num
-        if op == "<=":
-            return pct <= num
-        if op == "==":
-            return pct == num
-        if op == "!=":
-            return pct != num
-        return False
-
-    return [r for r in rows if ok(r)]
-
-
-_ONE_DAY_MS = 86400 * 1000
-
-
-def _date_str_to_start_of_day_ms(s: str) -> int | None:
-    """Parse YYYY-MM-DD to start-of-day (midnight) UTC timestamp in ms, or None if invalid."""
-    s = (s or "").strip()
-    if not s:
-        return None
-    m = re.match(r"^(\d{4})-(\d{2})-(\d{2})$", s)
-    if not m:
-        return None
-    try:
-        y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
-        dt = datetime(y, mo, d, 0, 0, 0, 0, tzinfo=timezone.utc)
-        return int(dt.timestamp() * 1000)
-    except (ValueError, OSError):
-        return None
-
-
-def _date_str_to_end_of_day_ms(s: str) -> int | None:
-    """Parse YYYY-MM-DD to end-of-day UTC timestamp in ms, or None if invalid."""
-    start = _date_str_to_start_of_day_ms(s)
-    if start is None:
-        return None
-    return start + _ONE_DAY_MS - 1
-
-
-def _parse_sale_end_value(value_str: str) -> tuple[str, int | None, int | None]:
-    """
-    Parse sale end filter value. Returns (mode, a, b) where:
-    - mode "op": a = single date (end-of-day ms), b = None. Use with operator.
-    - mode "range": a = min ms, b = max ms (both end-of-day).
-    - mode "": no filter (a=b=None).
-    """
-    s = (value_str or "").strip()
-    if not s:
-        return "", None, None
-    # Range: 2026-02-01..2026-02-28 or 2026-02-01 to 2026-02-28 (sale end in [min day, max day])
-    range_match = re.match(r"^(\d{4}-\d{2}-\d{2})\s*(?:\.\.|to)\s*(\d{4}-\d{2}-\d{2})$", s, re.I)
-    if range_match:
-        lo = _date_str_to_start_of_day_ms(range_match.group(1))
-        hi = _date_str_to_end_of_day_ms(range_match.group(2))
-        if lo is not None and hi is not None and lo <= hi:
-            return "range", lo, hi
-        return "", None, None
-    # Operator + date: <2026-03-01, >=2026-02-15
-    op_match = re.match(r"^(>=?|<=?|==?|!=)\s*(\d{4}-\d{2}-\d{2})$", s)
-    if op_match:
-        date_ms = _date_str_to_end_of_day_ms(op_match.group(2))
-        if date_ms is not None:
-            return "op", date_ms, None
-    return "", None, None
-
-
-def _apply_sale_end_filter(
-    rows: list[dict],
-    filter_type: str,
-    value_str: str,
-) -> list[dict]:
-    """
-    Filter/sort by sale end. filter_type: All, Ending Soon, Ending Latest, By date.
-    value_str used when By date: e.g. <2026-03-01 or 2026-02-01..2026-02-28.
-    Rows without sale end (None) are excluded from sort and from By date; for All they stay.
-    """
-    if not filter_type or filter_type == "All":
-        return rows
-    if filter_type == "Ending Soon":
-        # Sort by sale end ascending; put None at end
-        return sorted(rows, key=lambda r: (_sale_end_ms(r) is None, _sale_end_ms(r) or 0))
-    if filter_type == "Ending Latest":
-        # Sort by sale end descending; put None at end
-        return sorted(rows, key=lambda r: (_sale_end_ms(r) is None, -(_sale_end_ms(r) or 0)))
-    if filter_type == "By date":
-        mode, a, b = _parse_sale_end_value(value_str)
-        if mode == "":
-            return rows
-        if mode == "op":
-            op_match = re.match(r"^(>=?|<=?|==?|!=)\s*(\d{4}-\d{2}-\d{2})$", (value_str or "").strip())
-            op = op_match.group(1) if op_match else "=="
-            # a was end-of-day ms from parser; for op we need day boundaries
-            start_ms = _date_str_to_start_of_day_ms(op_match.group(2)) if op_match else None
-            if start_ms is None:
-                return rows
-            end_ms = start_ms + _ONE_DAY_MS - 1  # end of that day
-            next_day_ms = start_ms + _ONE_DAY_MS
-
-            def ok(row):
-                ms = _sale_end_ms(row)
-                if ms is None:
-                    return False
-                if op == "<": return ms < start_ms
-                if op == "<=": return ms <= end_ms
-                if op == ">": return ms >= next_day_ms
-                if op == ">=": return ms >= start_ms
-                if op == "==": return start_ms <= ms <= end_ms
-                if op == "!=": return not (start_ms <= ms <= end_ms)
-                return False
-            return [r for r in rows if ok(r)]
-        if mode == "range":
-            def ok(row):
-                ms = _sale_end_ms(row)
-                if ms is None:
-                    return False
-                return a <= ms <= b
-            return [r for r in rows if ok(r)]
-    return rows
 
 
 def _release_date_ms(row: dict) -> int | None:
@@ -276,7 +99,7 @@ def _apply_release_date_filter(
     if filter_type == "Oldest":
         return sorted(rows, key=lambda r: (_release_date_ms(r) is None, _release_date_ms(r) or 0))
     if filter_type == "By date":
-        mode, a, b = _parse_sale_end_value(value_str)
+        mode, a, b = parse_sale_end_value(value_str)
         if mode == "":
             return rows
         if mode == "op":
@@ -284,11 +107,11 @@ def _apply_release_date_filter(
             if not op_match:
                 return rows
             op, date_str = op_match.group(1), op_match.group(2)
-            start_ms = _date_str_to_start_of_day_ms(date_str)
+            start_ms = date_str_to_start_of_day_ms(date_str)
             if start_ms is None:
                 return rows
-            end_ms = start_ms + _ONE_DAY_MS - 1
-            next_day_ms = start_ms + _ONE_DAY_MS
+            end_ms = start_ms + ONE_DAY_MS - 1
+            next_day_ms = start_ms + ONE_DAY_MS
 
             def ok(row):
                 ms = _release_date_ms(row)
@@ -462,6 +285,474 @@ class Application:
         ttk.Button(btn_frame, text="Copy product URLs to clipboard", command=self._copy_tab2_urls).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(btn_frame, text="Export to Excel…", command=self._export_tab2_to_xlsx).pack(side=tk.LEFT)
 
+        # --- Tab 3: Email Builder ---
+        self._email_blocks = []
+        self._email_game_pool = []
+        tab3 = ttk.Frame(notebook, padding=10)
+        notebook.add(tab3, text="Email Builder")
+
+        # Left/top: settings and block list
+        top_frame = ttk.Frame(tab3)
+        top_frame.pack(fill=tk.X, pady=(0, 8))
+        ttk.Label(top_frame, text="Game source:").grid(row=0, column=0, sticky=tk.W, padx=(0, 8))
+        self.email_source_var = tk.StringVar(value="auto")
+        ttk.Radiobutton(top_frame, text="Auto-pick by criteria", variable=self.email_source_var, value="auto").grid(row=0, column=1, sticky=tk.W, padx=(0, 16))
+        ttk.Radiobutton(top_frame, text="Use my list (URLs below)", variable=self.email_source_var, value="list").grid(row=0, column=2, sticky=tk.W)
+        ttk.Label(tab3, text="Product URLs (when using list):").pack(anchor=tk.W, pady=(4, 0))
+        self.email_urls_text = scrolledtext.ScrolledText(tab3, height=3, width=70, wrap=tk.WORD)
+        self.email_urls_text.pack(fill=tk.X, pady=(0, 8))
+
+        counts_frame = ttk.Frame(tab3)
+        counts_frame.pack(fill=tk.X)
+        ttk.Label(counts_frame, text="Total games:").grid(row=0, column=0, sticky=tk.W, padx=(0, 8))
+        self.email_total_games_var = tk.StringVar(value="12")
+        ttk.Spinbox(counts_frame, from_=1, to=50, width=6, textvariable=self.email_total_games_var).grid(row=0, column=1, sticky=tk.W, padx=(0, 16))
+        ttk.Label(counts_frame, text="Featured games:").grid(row=0, column=2, sticky=tk.W, padx=(0, 8))
+        self.email_featured_var = tk.StringVar(value="2")
+        ttk.Spinbox(counts_frame, from_=0, to=50, width=6, textvariable=self.email_featured_var).grid(row=0, column=3, sticky=tk.W)
+
+        # Criteria (for auto-pick) - compact row
+        ttk.Label(tab3, text="Criteria (auto-pick): Score, min reviews, % off, sale end").pack(anchor=tk.W, pady=(8, 4))
+        crit_frame = ttk.Frame(tab3)
+        crit_frame.pack(fill=tk.X)
+        ttk.Label(crit_frame, text="Score:").grid(row=0, column=0, sticky=tk.W, padx=(0, 4))
+        self.email_score_type = tk.StringVar(value="All")
+        email_score_combo = ttk.Combobox(crit_frame, textvariable=self.email_score_type, width=10, state="readonly")
+        email_score_combo["values"] = ("All", "Exact %", "Operator", "Label")
+        email_score_combo.grid(row=0, column=1, sticky=tk.W, padx=(0, 4))
+        self.email_score_value = ttk.Entry(crit_frame, width=8)
+        self.email_score_value.grid(row=0, column=2, sticky=tk.W, padx=(0, 8))
+        self.email_label_value = tk.StringVar(value=STEAM_LABEL_ORDER[0] if STEAM_LABEL_ORDER else "")
+        email_label_combo = ttk.Combobox(crit_frame, textvariable=self.email_label_value, width=18, state="readonly")
+        email_label_combo["values"] = tuple(STEAM_LABEL_ORDER)
+        email_label_combo.grid(row=0, column=3, sticky=tk.W, padx=(0, 8))
+        ttk.Label(crit_frame, text="Min rev:").grid(row=0, column=4, sticky=tk.W, padx=(8, 4))
+        self.email_min_reviews = tk.StringVar(value="")
+        ttk.Entry(crit_frame, textvariable=self.email_min_reviews, width=6).grid(row=0, column=5, sticky=tk.W, padx=(0, 8))
+        ttk.Label(crit_frame, text="% off:").grid(row=0, column=6, sticky=tk.W, padx=(8, 4))
+        self.email_discount_value = tk.StringVar(value="")
+        ttk.Entry(crit_frame, textvariable=self.email_discount_value, width=8).grid(row=0, column=7, sticky=tk.W, padx=(0, 4))
+        ttk.Label(crit_frame, text="Sale end:").grid(row=0, column=8, sticky=tk.W, padx=(8, 4))
+        self.email_sale_end_type = tk.StringVar(value="All")
+        email_sale_end_combo = ttk.Combobox(crit_frame, textvariable=self.email_sale_end_type, width=12, state="readonly")
+        email_sale_end_combo["values"] = ("All", "Ending Soon", "Ending Latest", "By date")
+        email_sale_end_combo.grid(row=0, column=9, sticky=tk.W, padx=(0, 4))
+        self.email_sale_end_value = tk.StringVar(value="")
+        ttk.Entry(crit_frame, textvariable=self.email_sale_end_value, width=14).grid(row=0, column=10, sticky=tk.W)
+
+        # Display options
+        ttk.Label(tab3, text="Display:").pack(anchor=tk.W, pady=(8, 4))
+        disp_frame = ttk.Frame(tab3)
+        disp_frame.pack(fill=tk.X)
+        ttk.Label(disp_frame, text="Show:").grid(row=0, column=0, sticky=tk.W, padx=(0, 4))
+        self.email_show_var = tk.StringVar(value="price")
+        ttk.Radiobutton(disp_frame, text="Price", variable=self.email_show_var, value="price").grid(row=0, column=1, sticky=tk.W, padx=(0, 12))
+        ttk.Radiobutton(disp_frame, text="Discount %", variable=self.email_show_var, value="discount").grid(row=0, column=2, sticky=tk.W, padx=(0, 12))
+        ttk.Radiobutton(disp_frame, text="Both", variable=self.email_show_var, value="both").grid(row=0, column=3, sticky=tk.W, padx=(0, 16))
+        ttk.Label(disp_frame, text="Currency:").grid(row=0, column=3, sticky=tk.W, padx=(0, 4))
+        self.email_currency_var = tk.StringVar(value="USD")
+        curr_combo = ttk.Combobox(disp_frame, textvariable=self.email_currency_var, width=10, state="readonly")
+        curr_combo["values"] = tuple(ALL_CURRENCIES)
+        curr_combo.grid(row=0, column=4, sticky=tk.W, padx=(0, 16))
+        ttk.Label(disp_frame, text="Coupon % off:").grid(row=0, column=5, sticky=tk.W, padx=(0, 4))
+        self.email_coupon_var = tk.StringVar(value="0")
+        ttk.Spinbox(disp_frame, from_=0, to=50, width=5, textvariable=self.email_coupon_var).grid(row=0, column=6, sticky=tk.W)
+
+        # Block list
+        ttk.Label(tab3, text="Blocks (order):").pack(anchor=tk.W, pady=(8, 4))
+        block_btn_frame = ttk.Frame(tab3)
+        block_btn_frame.pack(fill=tk.X)
+        ttk.Button(block_btn_frame, text="Add block", command=self._email_add_block).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(block_btn_frame, text="Remove", command=self._email_remove_block).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(block_btn_frame, text="Move up", command=self._email_move_block_up).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(block_btn_frame, text="Move down", command=self._email_move_block_down).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(block_btn_frame, text="Edit", command=self._email_edit_block).pack(side=tk.LEFT)
+        block_list_frame = ttk.Frame(tab3)
+        block_list_frame.pack(fill=tk.X, pady=(0, 8))
+        self.email_block_listbox = tk.Listbox(block_list_frame, height=8, width=50)
+        self.email_block_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scroll = ttk.Scrollbar(block_list_frame, orient=tk.VERTICAL, command=self.email_block_listbox.yview)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.email_block_listbox.config(yscrollcommand=scroll.set)
+        self.email_block_listbox.bind("<Double-1>", lambda e: self._email_edit_block())
+
+        # Preview and export
+        ttk.Label(tab3, text="Preview & export:").pack(anchor=tk.W, pady=(8, 4))
+        export_frame = ttk.Frame(tab3)
+        export_frame.pack(fill=tk.X)
+        ttk.Button(export_frame, text="Load feed & build preview", command=self._email_build_preview).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(export_frame, text="Export HTML…", command=self._email_export_html).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(export_frame, text="Open preview in browser", command=self._email_open_preview_browser).pack(side=tk.LEFT)
+        self.email_status_var = tk.StringVar(value="")
+        ttk.Label(tab3, textvariable=self.email_status_var).pack(anchor=tk.W)
+        self._email_last_html = ""
+
+    def _email_block_label(self, block: dict) -> str:
+        btype = (block.get("type") or "").strip()
+        cfg = block.get("config") or {}
+        if btype == "deal_list":
+            return f"Deal list ({cfg.get('games_count', 4)} games)"
+        if btype == "featured":
+            return "Featured (1 game)"
+        if btype == "game_screenshots":
+            p = cfg.get("product")
+            title = (p.get("title") or "").strip()[:20] if p else "—"
+            return f"Game screenshots ({title}…)"
+        if btype == "title":
+            return f"Title: {(cfg.get('text') or '')[:30]}…" if (cfg.get("text") or "").strip() else "Title"
+        if btype == "button":
+            return f"Button: {(cfg.get('text') or 'View more')[:20]}"
+        return btype.capitalize()
+
+    def _email_refresh_listbox(self):
+        self.email_block_listbox.delete(0, tk.END)
+        for b in self._email_blocks:
+            self.email_block_listbox.insert(tk.END, self._email_block_label(b))
+
+    def _email_add_block(self):
+        types = ["header", "title", "deal_list", "featured", "text", "picture", "button", "game_screenshots", "footer"]
+        menu = tk.Menu(self.root, tearoff=0)
+        for t in types:
+            menu.add_command(label=t.replace("_", " ").title(), command=lambda bt=t: self._email_do_add_block(bt))
+        try:
+            menu.tk_popup(self.root.winfo_pointerx(), self.root.winfo_pointery())
+        finally:
+            menu.grab_release()
+
+    def _email_do_add_block(self, btype: str):
+        block = {"type": btype, "config": {}}
+        if btype == "deal_list":
+            block["config"] = {"games_count": 4, "image_source": "feed", "capsule_size": "header"}
+        elif btype == "featured":
+            block["config"] = {"image_source": "feed", "capsule_size": "header"}
+        elif btype == "game_screenshots":
+            block["config"] = {}
+        elif btype == "button":
+            block["config"] = {"text": "View more", "url": ""}
+        self._email_blocks.append(block)
+        self._email_refresh_listbox()
+
+    def _email_remove_block(self):
+        sel = self.email_block_listbox.curselection()
+        if not sel:
+            return
+        idx = int(sel[0])
+        self._email_blocks.pop(idx)
+        self._email_refresh_listbox()
+
+    def _email_move_block_up(self):
+        sel = self.email_block_listbox.curselection()
+        if not sel or sel[0] == 0:
+            return
+        idx = int(sel[0])
+        self._email_blocks[idx], self._email_blocks[idx - 1] = self._email_blocks[idx - 1], self._email_blocks[idx]
+        self._email_refresh_listbox()
+        self.email_block_listbox.selection_set(idx - 1)
+
+    def _email_move_block_down(self):
+        sel = self.email_block_listbox.curselection()
+        if not sel or sel[0] >= len(self._email_blocks) - 1:
+            return
+        idx = int(sel[0])
+        self._email_blocks[idx], self._email_blocks[idx + 1] = self._email_blocks[idx + 1], self._email_blocks[idx]
+        self._email_refresh_listbox()
+        self.email_block_listbox.selection_set(idx + 1)
+
+    def _email_edit_block(self):
+        sel = self.email_block_listbox.curselection()
+        if not sel:
+            return
+        idx = int(sel[0])
+        block = self._email_blocks[idx]
+        btype = (block.get("type") or "").strip().lower()
+        cfg = block.get("config") or {}
+        win = tk.Toplevel(self.root)
+        win.title(f"Edit {btype} block")
+        win.transient(self.root)
+        f = ttk.Frame(win, padding=10)
+        f.pack(fill=tk.BOTH, expand=True)
+        entries = {}
+
+        if btype == "header":
+            ttk.Label(f, text="Title:").grid(row=0, column=0, sticky=tk.W, pady=2)
+            entries["title"] = ttk.Entry(f, width=40)
+            entries["title"].insert(0, cfg.get("title") or "")
+            entries["title"].grid(row=0, column=1, sticky=tk.W, pady=2, padx=(8, 0))
+            ttk.Label(f, text="Logo URL:").grid(row=1, column=0, sticky=tk.W, pady=2)
+            entries["logo_url"] = ttk.Entry(f, width=40)
+            entries["logo_url"].insert(0, cfg.get("logo_url") or "")
+            entries["logo_url"].grid(row=1, column=1, sticky=tk.W, pady=2, padx=(8, 0))
+            ttk.Label(f, text="Link:").grid(row=2, column=0, sticky=tk.W, pady=2)
+            entries["link"] = ttk.Entry(f, width=40)
+            entries["link"].insert(0, cfg.get("link") or "")
+            entries["link"].grid(row=2, column=1, sticky=tk.W, pady=2, padx=(8, 0))
+            ttk.Label(f, text="View in browser URL:").grid(row=3, column=0, sticky=tk.W, pady=2)
+            entries["view_in_browser_url"] = ttk.Entry(f, width=40)
+            entries["view_in_browser_url"].insert(0, cfg.get("view_in_browser_url") or "")
+            entries["view_in_browser_url"].grid(row=3, column=1, sticky=tk.W, pady=2, padx=(8, 0))
+        elif btype == "title":
+            ttk.Label(f, text="Text:").grid(row=0, column=0, sticky=tk.W, pady=2)
+            entries["text"] = ttk.Entry(f, width=50)
+            entries["text"].insert(0, cfg.get("text") or "")
+            entries["text"].grid(row=0, column=1, sticky=tk.W, pady=2, padx=(8, 0))
+        elif btype == "deal_list":
+            ttk.Label(f, text="Games count:").grid(row=0, column=0, sticky=tk.W, pady=2)
+            entries["games_count"] = ttk.Entry(f, width=6)
+            entries["games_count"].insert(0, str(cfg.get("games_count") or 4))
+            entries["games_count"].grid(row=0, column=1, sticky=tk.W, pady=2, padx=(8, 0))
+            ttk.Label(f, text="Section title:").grid(row=1, column=0, sticky=tk.W, pady=2)
+            entries["section_title"] = ttk.Entry(f, width=40)
+            entries["section_title"].insert(0, cfg.get("section_title") or "")
+            entries["section_title"].grid(row=1, column=1, sticky=tk.W, pady=2, padx=(8, 0))
+            ttk.Label(f, text="Image source:").grid(row=2, column=0, sticky=tk.W, pady=2)
+            entries["image_source"] = tk.StringVar(value=cfg.get("image_source") or "feed")
+            ttk.Radiobutton(f, text="Product feed cover", variable=entries["image_source"], value="feed").grid(row=2, column=1, sticky=tk.W, padx=(8, 0))
+            ttk.Radiobutton(f, text="Steam capsule", variable=entries["image_source"], value="steam_capsule").grid(row=3, column=1, sticky=tk.W, padx=(8, 0))
+            ttk.Label(f, text="Capsule size:").grid(row=4, column=0, sticky=tk.W, pady=2)
+            entries["capsule_size"] = ttk.Combobox(f, width=12, state="readonly")
+            entries["capsule_size"]["values"] = ("header", "capsule_sm", "capsule_md", "capsule_616x353")
+            entries["capsule_size"].set(cfg.get("capsule_size") or "header")
+            entries["capsule_size"].grid(row=4, column=1, sticky=tk.W, pady=2, padx=(8, 0))
+        elif btype == "featured":
+            ttk.Label(f, text="Description:").grid(row=0, column=0, sticky=tk.W, pady=2)
+            entries["description"] = scrolledtext.ScrolledText(f, width=40, height=4, wrap=tk.WORD)
+            entries["description"].insert("1.0", cfg.get("description") or "")
+            entries["description"].grid(row=0, column=1, sticky=tk.W, pady=2, padx=(8, 0))
+            ttk.Label(f, text="Offer ends (e.g. Offer ends Nov 2):").grid(row=1, column=0, sticky=tk.W, pady=2)
+            entries["offer_ends"] = ttk.Entry(f, width=40)
+            entries["offer_ends"].insert(0, cfg.get("offer_ends") or "")
+            entries["offer_ends"].grid(row=1, column=1, sticky=tk.W, pady=2, padx=(8, 0))
+            ttk.Label(f, text="Image source:").grid(row=2, column=0, sticky=tk.W, pady=2)
+            entries["image_source"] = tk.StringVar(value=cfg.get("image_source") or "feed")
+            ttk.Radiobutton(f, text="Product feed cover", variable=entries["image_source"], value="feed").grid(row=2, column=1, sticky=tk.W, padx=(8, 0))
+            ttk.Radiobutton(f, text="Steam capsule", variable=entries["image_source"], value="steam_capsule").grid(row=3, column=1, sticky=tk.W, padx=(8, 0))
+            entries["capsule_size"] = ttk.Combobox(f, width=12, state="readonly")
+            entries["capsule_size"]["values"] = ("header", "capsule_sm", "capsule_md", "capsule_616x353")
+            entries["capsule_size"].set(cfg.get("capsule_size") or "header")
+            entries["capsule_size"].grid(row=4, column=1, sticky=tk.W, padx=(8, 0))
+        elif btype == "text":
+            ttk.Label(f, text="Content (HTML allowed):").grid(row=0, column=0, sticky=tk.NW, pady=2)
+            entries["content"] = scrolledtext.ScrolledText(f, width=50, height=6, wrap=tk.WORD)
+            entries["content"].insert("1.0", cfg.get("content") or "")
+            entries["content"].grid(row=0, column=1, sticky=tk.W, pady=2, padx=(8, 0))
+        elif btype == "picture":
+            ttk.Label(f, text="Image URL:").grid(row=0, column=0, sticky=tk.W, pady=2)
+            entries["image_url"] = ttk.Entry(f, width=50)
+            entries["image_url"].insert(0, cfg.get("image_url") or "")
+            entries["image_url"].grid(row=0, column=1, sticky=tk.W, pady=2, padx=(8, 0))
+            ttk.Label(f, text="Link URL:").grid(row=1, column=0, sticky=tk.W, pady=2)
+            entries["link_url"] = ttk.Entry(f, width=50)
+            entries["link_url"].insert(0, cfg.get("link_url") or "")
+            entries["link_url"].grid(row=1, column=1, sticky=tk.W, pady=2, padx=(8, 0))
+            ttk.Label(f, text="Alt text:").grid(row=2, column=0, sticky=tk.W, pady=2)
+            entries["alt"] = ttk.Entry(f, width=30)
+            entries["alt"].insert(0, cfg.get("alt") or "")
+            entries["alt"].grid(row=2, column=1, sticky=tk.W, pady=2, padx=(8, 0))
+        elif btype == "button":
+            ttk.Label(f, text="Button text:").grid(row=0, column=0, sticky=tk.W, pady=2)
+            entries["text"] = ttk.Entry(f, width=30)
+            entries["text"].insert(0, cfg.get("text") or "View more")
+            entries["text"].grid(row=0, column=1, sticky=tk.W, pady=2, padx=(8, 0))
+            ttk.Label(f, text="URL:").grid(row=1, column=0, sticky=tk.W, pady=2)
+            entries["url"] = ttk.Entry(f, width=50)
+            entries["url"].insert(0, cfg.get("url") or "")
+            entries["url"].grid(row=1, column=1, sticky=tk.W, pady=2, padx=(8, 0))
+        elif btype == "game_screenshots":
+            ttk.Label(f, text="Game (from pool):").grid(row=0, column=0, sticky=tk.W, pady=2)
+            pool = self._email_game_pool
+            titles = [(p.get("title") or "").strip() or "—" for p in pool]
+            entries["game_index"] = tk.StringVar(value=str(cfg.get("game_index", 0)) if pool else "0")
+            game_combo = ttk.Combobox(f, textvariable=entries["game_index"], width=35, state="readonly")
+            game_combo["values"] = [f"{i}: {t[:40]}" for i, t in enumerate(titles)] if titles else ["0: (no pool)"]
+            game_combo.grid(row=0, column=1, sticky=tk.W, pady=2, padx=(8, 0))
+            if pool and 0 <= (cfg.get("game_index") or 0) < len(pool):
+                game_combo.set(f"{cfg.get('game_index', 0)}: {(pool[cfg.get('game_index', 0)].get('title') or '')[:40]}")
+            ttk.Label(f, text="Caption:").grid(row=1, column=0, sticky=tk.W, pady=2)
+            entries["caption"] = ttk.Entry(f, width=40)
+            entries["caption"].insert(0, cfg.get("caption") or "")
+            entries["caption"].grid(row=1, column=1, sticky=tk.W, pady=2, padx=(8, 0))
+        elif btype == "footer":
+            ttk.Label(f, text="Unsubscribe URL:").grid(row=0, column=0, sticky=tk.W, pady=2)
+            entries["unsubscribe_url"] = ttk.Entry(f, width=50)
+            entries["unsubscribe_url"].insert(0, cfg.get("unsubscribe_url") or "")
+            entries["unsubscribe_url"].grid(row=0, column=1, sticky=tk.W, pady=2, padx=(8, 0))
+            ttk.Label(f, text="Privacy URL:").grid(row=1, column=0, sticky=tk.W, pady=2)
+            entries["privacy_url"] = ttk.Entry(f, width=50)
+            entries["privacy_url"].insert(0, cfg.get("privacy_url") or "")
+            entries["privacy_url"].grid(row=1, column=1, sticky=tk.W, pady=2, padx=(8, 0))
+            ttk.Label(f, text="Terms URL:").grid(row=2, column=0, sticky=tk.W, pady=2)
+            entries["terms_url"] = ttk.Entry(f, width=50)
+            entries["terms_url"].insert(0, cfg.get("terms_url") or "")
+            entries["terms_url"].grid(row=2, column=1, sticky=tk.W, pady=2, padx=(8, 0))
+            ttk.Label(f, text="Address:").grid(row=3, column=0, sticky=tk.W, pady=2)
+            entries["address"] = ttk.Entry(f, width=50)
+            entries["address"].insert(0, cfg.get("address") or "")
+            entries["address"].grid(row=3, column=1, sticky=tk.W, pady=2, padx=(8, 0))
+
+        def save():
+            new_cfg = dict(cfg)
+            if btype == "header":
+                new_cfg["title"] = entries["title"].get().strip()
+                new_cfg["logo_url"] = entries["logo_url"].get().strip()
+                new_cfg["link"] = entries["link"].get().strip()
+                new_cfg["view_in_browser_url"] = entries["view_in_browser_url"].get().strip()
+            elif btype == "title":
+                new_cfg["text"] = entries["text"].get().strip()
+            elif btype == "deal_list":
+                try:
+                    new_cfg["games_count"] = int(entries["games_count"].get().strip()) or 4
+                except ValueError:
+                    new_cfg["games_count"] = 4
+                new_cfg["section_title"] = entries["section_title"].get().strip()
+                new_cfg["image_source"] = entries["image_source"].get().strip() or "feed"
+                new_cfg["capsule_size"] = entries["capsule_size"].get().strip() or "header"
+            elif btype == "featured":
+                new_cfg["description"] = entries["description"].get("1.0", tk.END).strip()
+                new_cfg["offer_ends"] = entries["offer_ends"].get().strip()
+                new_cfg["image_source"] = entries["image_source"].get().strip() or "feed"
+                new_cfg["capsule_size"] = entries["capsule_size"].get().strip() or "header"
+            elif btype == "text":
+                new_cfg["content"] = entries["content"].get("1.0", tk.END).strip()
+            elif btype == "picture":
+                new_cfg["image_url"] = entries["image_url"].get().strip()
+                new_cfg["link_url"] = entries["link_url"].get().strip()
+                new_cfg["alt"] = entries["alt"].get().strip()
+            elif btype == "button":
+                new_cfg["text"] = entries["text"].get().strip() or "View more"
+                new_cfg["url"] = entries["url"].get().strip()
+            elif btype == "game_screenshots":
+                try:
+                    idx_str = entries["game_index"].get().strip().split(":")[0]
+                    new_cfg["game_index"] = int(idx_str)
+                except (ValueError, IndexError):
+                    new_cfg["game_index"] = 0
+                if self._email_game_pool and 0 <= new_cfg["game_index"] < len(self._email_game_pool):
+                    new_cfg["product"] = self._email_game_pool[new_cfg["game_index"]]
+                new_cfg["caption"] = entries["caption"].get().strip()
+            elif btype == "footer":
+                new_cfg["unsubscribe_url"] = entries["unsubscribe_url"].get().strip()
+                new_cfg["privacy_url"] = entries["privacy_url"].get().strip()
+                new_cfg["terms_url"] = entries["terms_url"].get().strip()
+                new_cfg["address"] = entries["address"].get().strip()
+            block["config"] = new_cfg
+            self._email_refresh_listbox()
+            win.destroy()
+
+        ttk.Button(win, text="Save", command=save).pack(pady=(10, 0))
+
+    def _email_get_game_pool(self) -> list[dict]:
+        """Build game pool for email: from URL list or auto-pick with filters."""
+        if self._index is None:
+            self._load_feed()
+        if self._index is None:
+            return []
+        try:
+            total = max(1, min(50, int(self.email_total_games_var.get().strip() or 12)))
+        except ValueError:
+            total = 12
+        if self.email_source_var.get() == "list":
+            urls = parse_pasted_urls(self.email_urls_text.get("1.0", tk.END))
+            products, _ = resolve_urls_to_products(self._index, urls)
+            return products[:total]
+        products = get_on_sale_products(self._index, resolve_steam_by_name=True)
+        rows = enrich_with_steam_reviews(products, progress_callback=None)
+        rows = apply_deal_filters(
+            rows,
+            score_type=self.email_score_type.get(),
+            score_value=self.email_score_value.get(),
+            label_value=self.email_label_value.get(),
+            min_reviews=self.email_min_reviews.get(),
+            discount_value=self.email_discount_value.get(),
+            sale_end_type=self.email_sale_end_type.get(),
+            sale_end_value=self.email_sale_end_value.get(),
+        )
+        return rows[:total]
+
+    def _email_build_preview(self):
+        self.email_status_var.set("Building…")
+        self.root.update()
+        try:
+            pool = self._email_get_game_pool()
+            # Enrich: sale_end_display for all; short_description for featured games
+            for p in pool:
+                end_str = _sale_end_str(p)
+                p["sale_end_display"] = ("Offer ends " + end_str) if end_str and end_str != "—" else ""
+            try:
+                featured_count = max(0, min(len(pool), int(self.email_featured_var.get().strip() or 0)))
+            except ValueError:
+                featured_count = 0
+            for i in range(min(featured_count, len(pool))):
+                p = pool[i]
+                app_id = p.get("steam_app_id")
+                if app_id is not None and not (p.get("short_description") or "").strip():
+                    details = fetch_app_details_full(app_id, use_cache=True)
+                    if details and details.get("short_description"):
+                        p["short_description"] = (details.get("short_description") or "").strip()
+            self._email_game_pool = pool
+            currency = (self.email_currency_var.get() or "USD").strip() or "USD"
+            try:
+                coupon = max(0, min(50, float(self.email_coupon_var.get().strip() or 0)))
+            except ValueError:
+                coupon = 0
+            show_val = (self.email_show_var.get() or "price").strip().lower() or "price"
+            if show_val not in ("price", "discount", "both"):
+                show_val = "price"
+            options = {
+                "currency": currency,
+                "show_price": show_val in ("price", "both"),
+                "show_both": show_val == "both",
+                "coupon_percent": coupon,
+            }
+
+            def get_screenshots(app_id):
+                out = fetch_app_details_full(app_id, use_cache=True)
+                return (out or {}).get("screenshots") or []
+
+            html = build_email_html(
+                self._email_blocks,
+                pool,
+                options,
+                get_screenshots=get_screenshots,
+            )
+            self._email_last_html = html
+            self.email_status_var.set(f"Preview built: {len(pool)} games, {len(self._email_blocks)} blocks.")
+        except Exception as e:
+            self.email_status_var.set("")
+            messagebox.showerror("Error", str(e))
+            import traceback
+            traceback.print_exc()
+
+    def _email_export_html(self):
+        if not self._email_last_html:
+            self._email_build_preview()
+        if not self._email_last_html:
+            messagebox.showwarning("No preview", "Build preview first.")
+            return
+        path = filedialog.asksaveasfilename(
+            defaultextension=".html",
+            filetypes=[("HTML files", "*.html"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(self._email_last_html)
+            messagebox.showinfo("Exported", f"Saved to {path}")
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
+    def _email_open_preview_browser(self):
+        if not self._email_last_html:
+            self._email_build_preview()
+        if not self._email_last_html:
+            messagebox.showwarning("No preview", "Build preview first.")
+            return
+        import tempfile
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".html", delete=False, encoding="utf-8") as f:
+            f.write(self._email_last_html)
+            path = f.name
+        webbrowser.open("file://" + path.replace("\\", "/"))
+
     def _get_selected_currencies(self) -> list[str]:
         return [c for c in ALL_CURRENCIES if self.currency_vars[c].get()]
 
@@ -529,10 +820,16 @@ class Application:
         search_query = self.tab2_search_var.get()
         release_date_type = self.release_date_filter_type.get()
         release_date_val = self.release_date_filter_value.get()
-        rows = _apply_score_filter(self._on_sale_rows, score_type, score_val, label_val)
-        rows = _apply_reviews_filter(rows, min_rev)
-        rows = _apply_discount_filter(rows, discount_val)
-        rows = _apply_sale_end_filter(rows, sale_end_type, sale_end_val)
+        rows = apply_deal_filters(
+            self._on_sale_rows,
+            score_type=score_type,
+            score_value=score_val,
+            label_value=label_val,
+            min_reviews=min_rev,
+            discount_value=discount_val,
+            sale_end_type=sale_end_type,
+            sale_end_value=sale_end_val,
+        )
         rows = _apply_game_search_filter(rows, search_query)
         rows = _apply_release_date_filter(rows, release_date_type, release_date_val)
         self._populate_tab2_sheet(rows)

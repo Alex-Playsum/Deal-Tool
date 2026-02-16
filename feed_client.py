@@ -92,9 +92,11 @@ def parse_feed(xml_content: str) -> list[dict]:
                 except ValueError:
                     pass
 
+        cover_image = data.get("cover_image", "").strip() or None
         items.append({
             "title": title,
             "link": link,
+            "cover_image": cover_image,
             "operatingSystems": operating_systems,
             "currency": currency,
             "discountPrice": discount_price,

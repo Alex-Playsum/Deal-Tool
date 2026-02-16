@@ -88,6 +88,7 @@ def build_index(items: list[dict]) -> dict[str, dict]:
             "originalPrice": it.get("originalPrice"),
         }
         steam_app_id = it.get("steam_app_id")
+        cover_image = it.get("cover_image") or None
         if key not in index:
             index[key] = {
                 "title": title,
@@ -95,6 +96,7 @@ def build_index(items: list[dict]) -> dict[str, dict]:
                 "platform": platform,
                 "variants_by_currency": {},
                 "steam_app_id": steam_app_id,
+                "cover_image": cover_image,
             }
         # One variant per currency (first seen)
         if currency not in index[key]["variants_by_currency"]:
@@ -105,6 +107,8 @@ def build_index(items: list[dict]) -> dict[str, dict]:
             index[key]["title"] = title
         if steam_app_id is not None and index[key]["steam_app_id"] is None:
             index[key]["steam_app_id"] = steam_app_id
+        if cover_image and not index[key].get("cover_image"):
+            index[key]["cover_image"] = cover_image
     # Apply mapping file (overrides or sets steam_app_id)
     for url_key, app_id in steam_mapping.items():
         if url_key in index:
