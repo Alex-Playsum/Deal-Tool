@@ -3,7 +3,9 @@
 import json
 import math
 import os
+import queue
 import re
+import threading
 import webbrowser
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -45,6 +47,76 @@ from steam_client import fetch_app_details_full
 
 # Directory for saved email templates (one JSON file per template)
 EMAIL_TEMPLATES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "email_templates")
+
+
+def _email_build_worker(worker_queue: queue.Queue, index: dict, params: dict, blocks: list) -> None:
+    """Run in background thread: build game pool, enrich, build email HTML. Puts (done|error) on queue."""
+    def put(msg):
+        worker_queue.put(msg)
+    try:
+        put(("progress", "email", "Getting game pool…"))
+        total = max(1, min(50, int((params.get("total") or "12").strip()) or 12))
+        source = (params.get("source") or "auto").strip() or "auto"
+        if source == "list":
+            urls = parse_pasted_urls(params.get("urls_text") or "")
+            products, _ = resolve_urls_to_products(index, urls)
+            pool = products[:total]
+        else:
+            products = get_on_sale_products(index, resolve_steam_by_name=True)
+            put(("progress", "email", "Fetching Steam data…"))
+            def progress(i, t):
+                put(("progress", "email", f"Fetching Steam… {i}/{t}"))
+            rows = enrich_with_steam_reviews(products, progress_callback=progress)
+            rows = apply_deal_filters(
+                rows,
+                score_type=params.get("score_type") or "All",
+                score_value=params.get("score_value") or "",
+                label_value=params.get("label_value") or "",
+                min_reviews=params.get("min_reviews") or "",
+                discount_value=params.get("discount_value") or "",
+                sale_end_type=params.get("sale_end_type") or "All",
+                sale_end_value=params.get("sale_end_value") or "",
+            )
+            pool = rows[:total]
+        put(("progress", "email", "Enriching…"))
+        for p in pool:
+            end_ms = _sale_end_ms(p)
+            end_formatted = _format_offer_ends_est(end_ms)
+            p["sale_end_display"] = ("Offer ends " + end_formatted) if end_formatted else ""
+        try:
+            featured_count = max(0, min(len(pool), int((params.get("featured_count") or "0").strip() or "0")))
+        except ValueError:
+            featured_count = 0
+        for i in range(min(featured_count, len(pool))):
+            p = pool[i]
+            app_id = p.get("steam_app_id")
+            if app_id is not None and not (p.get("short_description") or "").strip():
+                details = fetch_app_details_full(app_id, use_cache=True)
+                if details and details.get("short_description"):
+                    p["short_description"] = (details.get("short_description") or "").strip()
+        put(("progress", "email", "Building HTML…"))
+        currency = (params.get("currency") or "USD").strip() or "USD"
+        try:
+            coupon = max(0, min(50, float((params.get("coupon") or "0").strip() or 0)))
+        except ValueError:
+            coupon = 0
+        show_val = (params.get("show_val") or "price").strip().lower() or "price"
+        if show_val not in ("price", "discount", "both"):
+            show_val = "price"
+        options = {
+            "currency": currency,
+            "show_price": show_val in ("price", "both"),
+            "show_both": show_val == "both",
+            "coupon_percent": coupon,
+        }
+        def get_screenshots(app_id):
+            out = fetch_app_details_full(app_id, use_cache=True)
+            return (out or {}).get("screenshots") or []
+        html = build_email_html(blocks, pool, options, get_screenshots=get_screenshots)
+        status_msg = f"Preview built: {len(pool)} games, {len(blocks)} blocks."
+        put(("done", "email_build", (pool, html, status_msg)))
+    except Exception as e:
+        put(("error", "email_build", e))
 
 
 def _format_offer_ends_est(ms: int | None) -> str:
@@ -162,6 +234,8 @@ class Application:
         self._index = None
         self._on_sale_rows = []  # Enriched on-sale list for tab 2
         self._tab2_displayed_rows = []  # Last rows shown (for Copy URLs)
+        self._worker_queue = queue.Queue()
+        self._worker_busy = False
         self._build_ui()
 
     def _build_ui(self):
@@ -447,9 +521,9 @@ class Application:
     def _email_do_add_block(self, btype: str):
         block = {"type": btype, "config": {}}
         if btype == "deal_list":
-            block["config"] = {"games_count": 4, "image_source": "feed", "capsule_size": "header", "show_titles": True}
+            block["config"] = {"games_count": 4, "image_source": "feed", "capsule_size": "header", "show_titles": True, "show_rating": False, "show_reviews": False, "rating_style": "percent"}
         elif btype == "featured":
-            block["config"] = {"image_source": "feed", "capsule_size": "header", "show_titles": True}
+            block["config"] = {"image_source": "feed", "capsule_size": "header", "show_titles": True, "show_rating": False, "show_reviews": False, "rating_style": "percent"}
         elif btype == "game_screenshots":
             block["config"] = {}
         elif btype == "button":
@@ -540,6 +614,14 @@ class Application:
             entries["capsule_size"].grid(row=4, column=1, sticky=tk.W, pady=2, padx=(8, 0))
             entries["show_titles"] = tk.BooleanVar(value=cfg.get("show_titles", True))
             ttk.Checkbutton(f, text="Show game titles", variable=entries["show_titles"]).grid(row=5, column=1, sticky=tk.W, padx=(8, 0))
+            ttk.Label(f, text="Steam reviews:").grid(row=6, column=0, sticky=tk.W, pady=(8, 2))
+            entries["show_rating"] = tk.BooleanVar(value=cfg.get("show_rating", False))
+            entries["show_reviews"] = tk.BooleanVar(value=cfg.get("show_reviews", False))
+            ttk.Checkbutton(f, text="Show rating", variable=entries["show_rating"]).grid(row=6, column=1, sticky=tk.W, padx=(8, 0))
+            ttk.Checkbutton(f, text="Show review count", variable=entries["show_reviews"]).grid(row=7, column=1, sticky=tk.W, padx=(8, 0))
+            entries["rating_style"] = tk.StringVar(value=cfg.get("rating_style") or "percent")
+            ttk.Radiobutton(f, text="Rating as: %", variable=entries["rating_style"], value="percent").grid(row=8, column=1, sticky=tk.W, padx=(8, 0))
+            ttk.Radiobutton(f, text="Rating as: label (e.g. Very Positive)", variable=entries["rating_style"], value="label").grid(row=9, column=1, sticky=tk.W, padx=(8, 0))
         elif btype == "featured":
             ttk.Label(f, text="Description:").grid(row=0, column=0, sticky=tk.W, pady=2)
             entries["description"] = scrolledtext.ScrolledText(f, width=40, height=4, wrap=tk.WORD)
@@ -559,6 +641,14 @@ class Application:
             entries["capsule_size"].grid(row=4, column=1, sticky=tk.W, padx=(8, 0))
             entries["show_titles"] = tk.BooleanVar(value=cfg.get("show_titles", True))
             ttk.Checkbutton(f, text="Show game titles", variable=entries["show_titles"]).grid(row=5, column=1, sticky=tk.W, padx=(8, 0))
+            ttk.Label(f, text="Steam reviews:").grid(row=6, column=0, sticky=tk.W, pady=(8, 2))
+            entries["show_rating"] = tk.BooleanVar(value=cfg.get("show_rating", False))
+            entries["show_reviews"] = tk.BooleanVar(value=cfg.get("show_reviews", False))
+            ttk.Checkbutton(f, text="Show rating", variable=entries["show_rating"]).grid(row=6, column=1, sticky=tk.W, padx=(8, 0))
+            ttk.Checkbutton(f, text="Show review count", variable=entries["show_reviews"]).grid(row=7, column=1, sticky=tk.W, padx=(8, 0))
+            entries["rating_style"] = tk.StringVar(value=cfg.get("rating_style") or "percent")
+            ttk.Radiobutton(f, text="Rating as: %", variable=entries["rating_style"], value="percent").grid(row=8, column=1, sticky=tk.W, padx=(8, 0))
+            ttk.Radiobutton(f, text="Rating as: label (e.g. Very Positive)", variable=entries["rating_style"], value="label").grid(row=9, column=1, sticky=tk.W, padx=(8, 0))
         elif btype == "text":
             ttk.Label(f, text="Content (HTML allowed):").grid(row=0, column=0, sticky=tk.NW, pady=2)
             entries["content"] = scrolledtext.ScrolledText(f, width=50, height=6, wrap=tk.WORD)
@@ -636,12 +726,20 @@ class Application:
                 new_cfg["image_source"] = entries["image_source"].get().strip() or "feed"
                 new_cfg["capsule_size"] = entries["capsule_size"].get().strip() or "header"
                 new_cfg["show_titles"] = entries["show_titles"].get()
+                new_cfg["show_rating"] = entries["show_rating"].get()
+                new_cfg["show_reviews"] = entries["show_reviews"].get()
+                rs = (entries["rating_style"].get() or "percent").strip().lower()
+                new_cfg["rating_style"] = rs if rs in ("percent", "label") else "percent"
             elif btype == "featured":
                 new_cfg["description"] = entries["description"].get("1.0", tk.END).strip()
                 new_cfg["offer_ends"] = entries["offer_ends"].get().strip()
                 new_cfg["image_source"] = entries["image_source"].get().strip() or "feed"
                 new_cfg["capsule_size"] = entries["capsule_size"].get().strip() or "header"
                 new_cfg["show_titles"] = entries["show_titles"].get()
+                new_cfg["show_rating"] = entries["show_rating"].get()
+                new_cfg["show_reviews"] = entries["show_reviews"].get()
+                rs = (entries["rating_style"].get() or "percent").strip().lower()
+                new_cfg["rating_style"] = rs if rs in ("percent", "label") else "percent"
             elif btype == "text":
                 new_cfg["content"] = entries["content"].get("1.0", tk.END).strip()
             elif btype == "picture":
@@ -798,65 +896,42 @@ class Application:
         return rows[:total]
 
     def _email_build_preview(self):
+        if self._worker_busy:
+            messagebox.showwarning("Please wait", "Another operation is in progress.")
+            return
+        if self._index is None:
+            messagebox.showwarning("Load feed first", "Load the feed from the Deal Table or Deal Finder tab first.")
+            return
         self.email_status_var.set("Building…")
-        self.root.update()
-        try:
-            pool = self._email_get_game_pool()
-            # Enrich: sale_end_display for all (date + time EST); short_description for featured games
-            for p in pool:
-                end_ms = _sale_end_ms(p)
-                end_formatted = _format_offer_ends_est(end_ms)
-                p["sale_end_display"] = ("Offer ends " + end_formatted) if end_formatted else ""
-            try:
-                featured_count = max(0, min(len(pool), int(self.email_featured_var.get().strip() or 0)))
-            except ValueError:
-                featured_count = 0
-            for i in range(min(featured_count, len(pool))):
-                p = pool[i]
-                app_id = p.get("steam_app_id")
-                if app_id is not None and not (p.get("short_description") or "").strip():
-                    details = fetch_app_details_full(app_id, use_cache=True)
-                    if details and details.get("short_description"):
-                        p["short_description"] = (details.get("short_description") or "").strip()
-            self._email_game_pool = pool
-            currency = (self.email_currency_var.get() or "USD").strip() or "USD"
-            try:
-                coupon = max(0, min(50, float(self.email_coupon_var.get().strip() or 0)))
-            except ValueError:
-                coupon = 0
-            show_val = (self.email_show_var.get() or "price").strip().lower() or "price"
-            if show_val not in ("price", "discount", "both"):
-                show_val = "price"
-            options = {
-                "currency": currency,
-                "show_price": show_val in ("price", "both"),
-                "show_both": show_val == "both",
-                "coupon_percent": coupon,
-            }
+        self._worker_busy = True
+        self.root.after(50, self._process_worker_queue)
+        index = self._index
+        params = {
+            "total": self.email_total_games_var.get(),
+            "source": self.email_source_var.get(),
+            "urls_text": self.email_urls_text.get("1.0", tk.END),
+            "score_type": self.email_score_type.get(),
+            "score_value": self.email_score_value.get(),
+            "label_value": self.email_label_value.get(),
+            "min_reviews": self.email_min_reviews.get(),
+            "discount_value": self.email_discount_value.get(),
+            "sale_end_type": self.email_sale_end_type.get(),
+            "sale_end_value": self.email_sale_end_value.get(),
+            "featured_count": self.email_featured_var.get(),
+            "currency": self.email_currency_var.get(),
+            "coupon": self.email_coupon_var.get(),
+            "show_val": self.email_show_var.get(),
+        }
+        blocks = list(self._email_blocks)
 
-            def get_screenshots(app_id):
-                out = fetch_app_details_full(app_id, use_cache=True)
-                return (out or {}).get("screenshots") or []
+        def work():
+            _email_build_worker(self._worker_queue, index, params, blocks)
 
-            html = build_email_html(
-                self._email_blocks,
-                pool,
-                options,
-                get_screenshots=get_screenshots,
-            )
-            self._email_last_html = html
-            self.email_status_var.set(f"Preview built: {len(pool)} games, {len(self._email_blocks)} blocks.")
-        except Exception as e:
-            self.email_status_var.set("")
-            messagebox.showerror("Error", str(e))
-            import traceback
-            traceback.print_exc()
+        threading.Thread(target=work, daemon=True).start()
 
     def _email_export_html(self):
         if not self._email_last_html:
-            self._email_build_preview()
-        if not self._email_last_html:
-            messagebox.showwarning("No preview", "Build preview first.")
+            messagebox.showwarning("No preview", "Build preview first (Load feed & build preview), then export.")
             return
         path = filedialog.asksaveasfilename(
             defaultextension=".html",
@@ -873,9 +948,7 @@ class Application:
 
     def _email_open_preview_browser(self):
         if not self._email_last_html:
-            self._email_build_preview()
-        if not self._email_last_html:
-            messagebox.showwarning("No preview", "Build preview first.")
+            messagebox.showwarning("No preview", "Build preview first (Load feed & build preview), then open in browser.")
             return
         import tempfile
         with tempfile.NamedTemporaryFile(mode="w", suffix=".html", delete=False, encoding="utf-8") as f:
@@ -886,17 +959,71 @@ class Application:
     def _get_selected_currencies(self) -> list[str]:
         return [c for c in ALL_CURRENCIES if self.currency_vars[c].get()]
 
+    def _process_worker_queue(self):
+        """Process messages from worker thread (progress, done, error). Must run on main thread."""
+        while True:
+            try:
+                msg = self._worker_queue.get_nowait()
+            except queue.Empty:
+                break
+            kind = msg[0] if isinstance(msg, (list, tuple)) else msg
+            if kind == "progress":
+                _, target, text = msg
+                if target == "tab2":
+                    self.tab2_status.config(text=text)
+                elif target == "email":
+                    self.email_status_var.set(text)
+            elif kind == "done":
+                _, op, payload = msg
+                if op == "load_feed":
+                    self._feed_items, self._index = payload
+                    self.input_text.config(cursor="")
+                    messagebox.showinfo("Feed loaded", f"Loaded {len(self._feed_items)} variants ({len(self._index)} products).")
+                elif op == "fetch_on_sale":
+                    self._on_sale_rows = payload
+                    self._apply_filters_tab2()
+                    self.tab2_status.config(text=f"Done. {len(self._tab2_displayed_rows)} products (after filters).")
+                elif op == "email_build":
+                    pool, html, status_msg = payload
+                    self._email_game_pool = pool
+                    self._email_last_html = html
+                    self.email_status_var.set(status_msg)
+                self._worker_busy = False
+            elif kind == "error":
+                _, op, e = msg
+                self._worker_busy = False
+                self.input_text.config(cursor="")
+                if op == "load_feed":
+                    messagebox.showerror("Error", f"Failed to load feed:\n{e}")
+                elif op == "fetch_on_sale":
+                    self.tab2_status.config(text="")
+                    self._on_sale_rows = []
+                    messagebox.showerror("Error", f"Failed:\n{e}")
+                elif op == "email_build":
+                    self.email_status_var.set("")
+                    messagebox.showerror("Error", str(e))
+                    import traceback
+                    traceback.print_exc()
+        if self._worker_busy:
+            self.root.after(50, self._process_worker_queue)
+
     def _load_feed(self):
+        if self._worker_busy:
+            messagebox.showwarning("Please wait", "Another operation is in progress.")
+            return
         self.input_text.config(cursor="watch")
-        self.root.update()
-        try:
-            self._feed_items = fetch_and_parse()
-            self._index = items_to_index(self._feed_items)
-            messagebox.showinfo("Feed loaded", f"Loaded {len(self._feed_items)} variants ({len(self._index)} products).")
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to load feed:\n{e}")
-        finally:
-            self.input_text.config(cursor="")
+        self._worker_busy = True
+        self.root.after(50, self._process_worker_queue)
+
+        def work():
+            try:
+                feed_items = fetch_and_parse()
+                index = items_to_index(feed_items)
+                self._worker_queue.put(("done", "load_feed", (feed_items, index)))
+            except Exception as e:
+                self._worker_queue.put(("error", "load_feed", e))
+
+        threading.Thread(target=work, daemon=True).start()
 
     def _load_feed_tab2(self):
         if self._index is None:
@@ -905,28 +1032,29 @@ class Application:
             messagebox.showinfo("Feed", "Feed already loaded.")
 
     def _fetch_on_sale(self):
+        if self._worker_busy:
+            messagebox.showwarning("Please wait", "Another operation is in progress.")
+            return
         if self._index is None:
-            self._load_feed()
-        if self._index is None:
+            messagebox.showwarning("Load feed first", "Load the feed from the Deal Table or Deal Finder tab first.")
             return
         self.tab2_status.config(text="Getting on-sale products...")
-        self.root.update()
-        try:
-            products = get_on_sale_products(self._index, resolve_steam_by_name=True)
-            self.tab2_status.config(text=f"Found {len(products)} on sale. Fetching Steam data...")
-            self.root.update()
+        self._worker_busy = True
+        self.root.after(50, self._process_worker_queue)
+        index = self._index
 
-            def progress(i, total):
-                self.tab2_status.config(text=f"Fetching Steam data... {i}/{total}")
-                self.root.update()
+        def work():
+            try:
+                products = get_on_sale_products(index, resolve_steam_by_name=True)
+                self._worker_queue.put(("progress", "tab2", f"Found {len(products)} on sale. Fetching Steam data..."))
+                def progress(i, total):
+                    self._worker_queue.put(("progress", "tab2", f"Fetching Steam data... {i}/{total}"))
+                rows = enrich_with_steam_reviews(products, progress_callback=progress)
+                self._worker_queue.put(("done", "fetch_on_sale", rows))
+            except Exception as e:
+                self._worker_queue.put(("error", "fetch_on_sale", e))
 
-            self._on_sale_rows = enrich_with_steam_reviews(products, progress_callback=progress)
-            self._apply_filters_tab2()
-            self.tab2_status.config(text=f"Done. {len(self._tab2_displayed_rows)} products (after filters).")
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed:\n{e}")
-            self.tab2_status.config(text="")
-            self._on_sale_rows = []
+        threading.Thread(target=work, daemon=True).start()
 
     def _toggle_filters_tab2(self):
         """Show or hide the filter controls to free space for the results list."""

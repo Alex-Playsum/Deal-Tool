@@ -186,6 +186,35 @@ def _render_title(block: dict) -> str:
 </table>'''
 
 
+def _format_steam_reviews_line(
+    product: dict,
+    show_rating: bool,
+    show_reviews: bool,
+    rating_style: str,
+) -> str:
+    """Format Steam rating/reviews for display. Returns empty string if nothing to show."""
+    if not show_rating and not show_reviews:
+        return ""
+    rating_part = ""
+    if show_rating:
+        if (rating_style or "percent").strip().lower() == "label":
+            desc = (product.get("steam_review_desc") or "").strip()
+            rating_part = desc or "N/A"
+        else:
+            pct = product.get("steam_percent_positive")
+            rating_part = f"{pct}%" if pct is not None else "N/A"
+    reviews_part = ""
+    if show_reviews:
+        total = product.get("steam_total_reviews") or 0
+        if total > 0:
+            reviews_part = f"{total:,} reviews"
+        else:
+            reviews_part = "No reviews"
+    if rating_part and reviews_part:
+        return f"{rating_part} ({reviews_part})"
+    return rating_part or reviews_part
+
+
 def _render_deal_list(
     block: dict,
     games: list[dict],
@@ -197,6 +226,11 @@ def _render_deal_list(
     capsule_size = (cfg.get("capsule_size") or "header").strip() or "header"
     section_title = (cfg.get("section_title") or "").strip()
     show_titles = cfg.get("show_titles", True)
+    show_rating = cfg.get("show_rating", False)
+    show_reviews = cfg.get("show_reviews", False)
+    rating_style = (cfg.get("rating_style") or "percent").strip().lower() or "percent"
+    if rating_style not in ("percent", "label"):
+        rating_style = "percent"
     currency = options.get("currency") or "USD"
     show_price = options.get("show_price", True)
     show_both = options.get("show_both", False)
@@ -218,10 +252,13 @@ def _render_deal_list(
             img_html = f'<a href="{html_module.escape(link)}"><img src="{html_module.escape(img_url)}" alt="{html_module.escape(title)}" style="width:100%;max-width:260px;height:auto;display:block;border:0;" /></a>' if link else f'<img src="{html_module.escape(img_url)}" alt="{html_module.escape(title)}" style="width:100%;max-width:260px;height:auto;display:block;border:0;" />'
         title_html = f'<a href="{html_module.escape(link)}" style="color:{LINK_COLOR};text-decoration:none;font-weight:bold;font-size:14px;">{html_module.escape(title)}</a>' if link else f'<span style="color:{TEXT_PRIMARY};font-weight:bold;font-size:14px;">{html_module.escape(title)}</span>'
         title_block = f'<div style="margin-bottom:4px;">{title_html}</div>' if show_titles else ""
+        reviews_line = _format_steam_reviews_line(p, show_rating, show_reviews, rating_style)
+        reviews_block = f'<div style="margin-bottom:4px;font-size:12px;color:{TEXT_SECONDARY};">{html_module.escape(reviews_line)}</div>' if reviews_line else ""
         cells.append(
             f'<td style="{cell_style}">'
             f'<div style="margin-bottom:6px;">{img_html}</div>'
             f'{title_block}'
+            f'{reviews_block}'
             f'<div>{pricing_html}</div>'
             "</td>"
         )
@@ -256,6 +293,11 @@ def _render_featured(
     image_source = (cfg.get("image_source") or "feed").strip() or "feed"
     capsule_size = (cfg.get("capsule_size") or "header").strip() or "header"
     show_titles = cfg.get("show_titles", True)
+    show_rating = cfg.get("show_rating", False)
+    show_reviews = cfg.get("show_reviews", False)
+    rating_style = (cfg.get("rating_style") or "percent").strip().lower() or "percent"
+    if rating_style not in ("percent", "label"):
+        rating_style = "percent"
     description = (cfg.get("description") or "").strip() or (game.get("short_description") or "").strip()
     offer_ends = (cfg.get("offer_ends") or "").strip() or (game.get("sale_end_display") or "").strip()
     currency = options.get("currency") or "USD"
@@ -272,6 +314,8 @@ def _render_featured(
         img_html = f'<a href="{html_module.escape(link)}"><img src="{html_module.escape(img_url)}" alt="{html_module.escape(title)}" style="width:100%;max-width:100%;height:auto;display:block;border:0;" /></a>' if link else f'<img src="{html_module.escape(img_url)}" alt="{html_module.escape(title)}" style="width:100%;max-width:100%;height:auto;display:block;border:0;" />'
     title_html = f'<a href="{html_module.escape(link)}" style="color:{LINK_COLOR};text-decoration:none;font-size:20px;font-weight:bold;">{html_module.escape(title)}</a>' if link else f'<span style="color:{TEXT_PRIMARY};font-size:20px;font-weight:bold;">{html_module.escape(title)}</span>'
     title_block = f'<div style="margin-bottom:6px;">{title_html}</div>' if show_titles else ""
+    reviews_line = _format_steam_reviews_line(game, show_rating, show_reviews, rating_style)
+    reviews_block = f'<div style="margin-bottom:6px;font-size:12px;color:{TEXT_SECONDARY};">{html_module.escape(reviews_line)}</div>' if reviews_line else ""
     offer_html = f'<p style="margin:0 0 8px 0;font-size:12px;color:{TEXT_SECONDARY};">{html_module.escape(offer_ends)}</p>' if offer_ends else ""
     desc_html = f'<p style="margin:8px 0 0 0;font-size:14px;line-height:1.5;color:{TEXT_PRIMARY};">{html_module.escape(description)}</p>' if description else ""
     return f'''
@@ -279,6 +323,7 @@ def _render_featured(
   <tr><td style="{_block_cell_style()}padding-top:0;">
     <div style="margin-bottom:12px;">{img_html}</div>
     {title_block}
+    {reviews_block}
     <div style="margin-bottom:6px;">{pricing_html}</div>
     {offer_html}
     {desc_html}
