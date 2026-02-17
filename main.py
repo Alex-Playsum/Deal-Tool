@@ -1,13 +1,15 @@
 """Reddit Deal Table Tool - GUI entry point."""
 
+import json
 import math
+import os
 import re
 import webbrowser
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 import tkinter as tk
-from tkinter import ttk, scrolledtext, messagebox, filedialog
+from tkinter import ttk, scrolledtext, messagebox, filedialog, simpledialog
 
 from config import (
     ALL_CURRENCIES,
@@ -40,6 +42,9 @@ from steam_app_list import clear_app_list_cache, clear_name_resolution_cache
 from steam_appdetails_cache import clear as clear_steam_appdetails_cache
 from email_html import build_email_html
 from steam_client import fetch_app_details_full
+
+# Directory for saved email templates (one JSON file per template)
+EMAIL_TEMPLATES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "email_templates")
 
 
 def _format_offer_ends_est(ms: int | None) -> str:
@@ -389,6 +394,13 @@ class Application:
         self.email_block_listbox.config(yscrollcommand=scroll.set)
         self.email_block_listbox.bind("<Double-1>", lambda e: self._email_edit_block())
 
+        # Templates
+        ttk.Label(tab3, text="Templates:").pack(anchor=tk.W, pady=(8, 4))
+        template_btn_frame = ttk.Frame(tab3)
+        template_btn_frame.pack(fill=tk.X)
+        ttk.Button(template_btn_frame, text="Save as template…", command=self._email_save_template).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(template_btn_frame, text="Load template", command=self._email_load_template).pack(side=tk.LEFT)
+
         # Preview and export
         ttk.Label(tab3, text="Preview & export:").pack(anchor=tk.W, pady=(8, 4))
         export_frame = ttk.Frame(tab3)
@@ -658,6 +670,104 @@ class Application:
             win.destroy()
 
         ttk.Button(win, text="Save", command=save).pack(pady=(10, 0))
+
+    def _email_save_template(self):
+        """Save current blocks and display options as a named template (Option A: one JSON file per template)."""
+        name = simpledialog.askstring("Save template", "Template name:", parent=self.root)
+        if not name or not name.strip():
+            return
+        # Sanitize to a safe filename (alnum + underscore)
+        safe = "".join(c if c.isalnum() or c in " _-" else "" for c in name.strip()).replace(" ", "_").strip("_")
+        if not safe:
+            safe = "template"
+        os.makedirs(EMAIL_TEMPLATES_DIR, exist_ok=True)
+        # Build blocks for storage: strip runtime-only 'product' from game_screenshots
+        blocks = []
+        for b in self._email_blocks:
+            blk = {"type": b.get("type") or "", "config": dict(b.get("config") or {})}
+            if blk["type"] == "game_screenshots" and "product" in blk["config"]:
+                del blk["config"]["product"]
+            blocks.append(blk)
+        show_val = (self.email_show_var.get() or "price").strip().lower() or "price"
+        if show_val not in ("price", "discount", "both"):
+            show_val = "price"
+        try:
+            coupon = max(0, min(50, float(self.email_coupon_var.get().strip() or 0)))
+        except ValueError:
+            coupon = 0
+        display = {
+            "currency": (self.email_currency_var.get() or "USD").strip() or "USD",
+            "show": show_val,
+            "coupon_percent": coupon,
+        }
+        path = os.path.join(EMAIL_TEMPLATES_DIR, safe + ".json")
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"blocks": blocks, "display": display}, f, indent=2)
+            messagebox.showinfo("Template saved", f"Template saved as '{safe}'.")
+        except OSError as e:
+            messagebox.showerror("Error", f"Could not save template: {e}")
+
+    def _email_load_template(self):
+        """Load a saved template: replace blocks and display options (Option A: list JSON files in templates dir)."""
+        if not os.path.isdir(EMAIL_TEMPLATES_DIR):
+            messagebox.showinfo("Load template", "No templates saved yet. Use 'Save as template…' first.")
+            return
+        files = sorted(f for f in os.listdir(EMAIL_TEMPLATES_DIR) if f.endswith(".json"))
+        if not files:
+            messagebox.showinfo("Load template", "No saved templates.")
+            return
+        names = [os.path.splitext(f)[0] for f in files]
+        win = tk.Toplevel(self.root)
+        win.title("Load template")
+        win.transient(self.root)
+        frm = ttk.Frame(win, padding=10)
+        frm.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(frm, text="Choose a template:").pack(anchor=tk.W)
+        lb = tk.Listbox(frm, height=min(12, len(names)), width=40)
+        lb.pack(fill=tk.BOTH, expand=True, pady=(4, 8))
+        for n in names:
+            lb.insert(tk.END, n)
+        if names:
+            lb.selection_set(0)
+        btn_frm = ttk.Frame(frm)
+        btn_frm.pack(fill=tk.X)
+
+        def load():
+            sel = lb.curselection()
+            if not sel:
+                messagebox.showwarning("Load template", "Select a template.")
+                return
+            name = names[int(sel[0])]
+            path = os.path.join(EMAIL_TEMPLATES_DIR, name + ".json")
+            try:
+                with open(path, encoding="utf-8") as fp:
+                    data = json.load(fp)
+            except (OSError, json.JSONDecodeError) as e:
+                messagebox.showerror("Error", f"Could not load template: {e}")
+                return
+            blocks = data.get("blocks") or []
+            if not isinstance(blocks, list):
+                messagebox.showerror("Error", "Invalid template: 'blocks' must be a list.")
+                return
+            self._email_blocks = [{"type": b.get("type") or "", "config": dict(b.get("config") or {})} for b in blocks]
+            disp = data.get("display") or {}
+            if isinstance(disp, dict):
+                if "currency" in disp:
+                    self.email_currency_var.set(disp.get("currency") or "USD")
+                if "show" in disp and (disp.get("show") or "").strip() in ("price", "discount", "both"):
+                    self.email_show_var.set((disp.get("show") or "price").strip())
+                if "coupon_percent" in disp:
+                    try:
+                        v = max(0, min(50, float(disp.get("coupon_percent", 0))))
+                        self.email_coupon_var.set(str(int(v) if v == int(v) else v))
+                    except (TypeError, ValueError):
+                        pass
+            self._email_refresh_listbox()
+            win.destroy()
+
+        ttk.Button(btn_frm, text="Load", command=load).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(btn_frm, text="Cancel", command=win.destroy).pack(side=tk.LEFT)
 
     def _email_get_game_pool(self) -> list[dict]:
         """Build game pool for email: from URL list or auto-pick with filters."""

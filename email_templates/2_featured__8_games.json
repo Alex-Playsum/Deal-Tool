@@ -1,0 +1,80 @@
+{
+  "blocks": [
+    {
+      "type": "header",
+      "config": {
+        "title": "",
+        "logo_url": "https://app.playsum.live/playsum-logo-banner.png",
+        "link": "https://store.playsum.live/",
+        "view_in_browser_url": ""
+      }
+    },
+    {
+      "type": "title",
+      "config": {}
+    },
+    {
+      "type": "featured",
+      "config": {
+        "image_source": "steam_capsule",
+        "capsule_size": "header",
+        "show_titles": true,
+        "description": "",
+        "offer_ends": ""
+      }
+    },
+    {
+      "type": "button",
+      "config": {
+        "text": "View more",
+        "url": ""
+      }
+    },
+    {
+      "type": "deal_list",
+      "config": {
+        "games_count": 4,
+        "image_source": "steam_capsule",
+        "capsule_size": "capsule_616x353",
+        "show_titles": true,
+        "section_title": ""
+      }
+    },
+    {
+      "type": "deal_list",
+      "config": {
+        "games_count": 4,
+        "image_source": "steam_capsule",
+        "capsule_size": "capsule_616x353",
+        "show_titles": true,
+        "section_title": ""
+      }
+    },
+    {
+      "type": "button",
+      "config": {
+        "text": "View more",
+        "url": ""
+      }
+    },
+    {
+      "type": "featured",
+      "config": {
+        "image_source": "steam_capsule",
+        "capsule_size": "header",
+        "show_titles": true,
+        "description": "",
+        "offer_ends": ""
+      }
+    },
+    {
+      "type": "footer",
+      "config": {}
+    }
+  ],
+  "display": {
+    "currency": "USD",
+    "show": "both",
+    "coupon_percent": 0
+  }
+}
