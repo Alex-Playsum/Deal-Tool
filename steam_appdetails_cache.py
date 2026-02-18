@@ -6,16 +6,25 @@ from datetime import datetime, timedelta
 
 from config import STEAM_APPDETAILS_CACHE_PATH, STEAM_APPDETAILS_CACHE_TTL_HOURS
 
+# In-memory cache so we only read/parse the file once per process.
+_memory: dict | None = None
+
 
 def _load_all() -> dict:
-    """Load full cache from disk. Returns dict app_id_str -> {release_date?, screenshots?, short_description?, fetched_at}."""
+    """Load full cache from disk (or return in-memory copy). Returns dict app_id_str -> {release_date?, ...}."""
+    global _memory
+    if _memory is not None:
+        return _memory
     if not os.path.isfile(STEAM_APPDETAILS_CACHE_PATH):
-        return {}
+        _memory = {}
+        return _memory
     try:
         with open(STEAM_APPDETAILS_CACHE_PATH, encoding="utf-8") as f:
-            return json.load(f)
+            _memory = json.load(f)
+        return _memory
     except (json.JSONDecodeError, OSError):
-        return {}
+        _memory = {}
+        return _memory
 
 
 def _save_all(data: dict) -> None:
@@ -122,6 +131,7 @@ def get_publisher(app_id: int | str) -> str | None:
 
 def set(app_id: int | str, release_date: str | None) -> None:
     """Store release_date for app_id with current timestamp (merge; keeps existing screenshots, developer, publisher)."""
+    global _memory
     data = _load_all()
     key = str(app_id)
     now = datetime.utcnow().isoformat() + "Z"
@@ -139,6 +149,7 @@ def set(app_id: int | str, release_date: str | None) -> None:
             "fetched_at": now,
         }
     _save_all(data)
+    _memory = data
 
 
 def set_full(
@@ -151,6 +162,7 @@ def set_full(
     publisher: str | None = None,
 ) -> None:
     """Store full appdetails entry: release_date, screenshots, short_description, capsule_urls, developer, publisher."""
+    global _memory
     data = _load_all()
     data[str(app_id)] = {
         "release_date": release_date,
@@ -162,9 +174,12 @@ def set_full(
         "fetched_at": datetime.utcnow().isoformat() + "Z",
     }
     _save_all(data)
+    _memory = data
 
 
 def clear() -> None:
-    """Remove cache file from disk."""
+    """Remove cache file from disk and in-memory cache."""
+    global _memory
+    _memory = None
     if os.path.isfile(STEAM_APPDETAILS_CACHE_PATH):
         os.remove(STEAM_APPDETAILS_CACHE_PATH)

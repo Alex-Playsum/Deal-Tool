@@ -118,27 +118,40 @@ def get_app_list(force_refresh: bool = False) -> list[dict]:
         return apps  # Return existing cache on error
 
 
+# In-memory cache so we only read/parse the resolution cache once per process.
+_memory_resolution: dict[str, int] | None = None
+
+
 def _load_resolution_cache() -> dict[str, int]:
-    """Load name->appid resolution cache from disk. Returns dict normalized_title -> app_id."""
+    """Load name->appid resolution cache from disk (or return in-memory copy). Returns dict normalized_title -> app_id."""
+    global _memory_resolution
+    if _memory_resolution is not None:
+        return _memory_resolution
     if not os.path.isfile(STEAM_NAME_RESOLUTION_CACHE_PATH):
-        return {}
+        _memory_resolution = {}
+        return _memory_resolution
     try:
         with open(STEAM_NAME_RESOLUTION_CACHE_PATH, encoding="utf-8") as f:
             data = json.load(f)
         if not isinstance(data, dict):
-            return {}
-        return {k: int(v) for k, v in data.items() if v is not None and isinstance(v, (int, str)) and str(v).isdigit()}
+            _memory_resolution = {}
+            return _memory_resolution
+        _memory_resolution = {k: int(v) for k, v in data.items() if v is not None and isinstance(v, (int, str)) and str(v).isdigit()}
+        return _memory_resolution
     except (json.JSONDecodeError, OSError, ValueError):
-        return {}
+        _memory_resolution = {}
+        return _memory_resolution
 
 
 def _save_resolution_cache(cache: dict[str, int]) -> None:
-    """Write name->appid resolution cache to disk."""
+    """Write name->appid resolution cache to disk and update in-memory cache."""
+    global _memory_resolution
     dirpath = os.path.dirname(STEAM_NAME_RESOLUTION_CACHE_PATH)
     if dirpath and not os.path.isdir(dirpath):
         os.makedirs(dirpath, exist_ok=True)
     with open(STEAM_NAME_RESOLUTION_CACHE_PATH, "w", encoding="utf-8") as f:
         json.dump(cache, f, indent=0)
+    _memory_resolution = cache
 
 
 def _normalize_title(title: str) -> str:
@@ -216,6 +229,8 @@ def clear_app_list_cache() -> None:
 
 
 def clear_name_resolution_cache() -> None:
-    """Remove name->appid resolution cache from disk."""
+    """Remove name->appid resolution cache from disk and in-memory cache."""
+    global _memory_resolution
+    _memory_resolution = None
     if os.path.isfile(STEAM_NAME_RESOLUTION_CACHE_PATH):
         os.remove(STEAM_NAME_RESOLUTION_CACHE_PATH)

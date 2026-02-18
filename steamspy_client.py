@@ -11,25 +11,36 @@ from config import STEAMSPY_APPDETAILS_URL, STEAMSPY_CACHE_PATH, STEAMSPY_CACHE_
 
 REQUEST_DELAY_SECONDS = 0.3
 
+# In-memory cache so we only read/parse the file once per process.
+_memory: dict | None = None
+
 
 def _load_cache() -> dict:
-    """Load full cache from disk. Returns dict app_id_str -> {tags: list[str], fetched_at: str}."""
+    """Load full cache from disk (or return in-memory copy). Returns dict app_id_str -> {tags, fetched_at}."""
+    global _memory
+    if _memory is not None:
+        return _memory
     if not os.path.isfile(STEAMSPY_CACHE_PATH):
-        return {}
+        _memory = {}
+        return _memory
     try:
         with open(STEAMSPY_CACHE_PATH, encoding="utf-8") as f:
-            return json.load(f)
+            _memory = json.load(f)
+        return _memory
     except (json.JSONDecodeError, OSError):
-        return {}
+        _memory = {}
+        return _memory
 
 
 def _save_cache(data: dict) -> None:
-    """Write cache to disk."""
+    """Write cache to disk and update in-memory cache."""
+    global _memory
     dirpath = os.path.dirname(STEAMSPY_CACHE_PATH)
     if dirpath and not os.path.isdir(dirpath):
         os.makedirs(dirpath, exist_ok=True)
     with open(STEAMSPY_CACHE_PATH, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=0)
+    _memory = data
 
 
 def _is_expired(fetched_at: str) -> bool:
@@ -72,6 +83,8 @@ def fetch_steamspy_tags(app_id: int | str, use_cache: bool = True) -> list[str]:
 
 
 def clear_steamspy_cache() -> None:
-    """Remove SteamSpy cache file from disk."""
+    """Remove SteamSpy cache file from disk and in-memory cache."""
+    global _memory
+    _memory = None
     if os.path.isfile(STEAMSPY_CACHE_PATH):
         os.remove(STEAMSPY_CACHE_PATH)

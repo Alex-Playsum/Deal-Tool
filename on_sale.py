@@ -1,6 +1,7 @@
 """Get products currently on sale from the index; resolve Steam App ID by name when needed."""
 
-from datetime import datetime
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from config import STEAM_WEB_API_KEY
 from steam_app_list import get_app_list, resolve_name_to_app_id_cached
@@ -59,13 +60,14 @@ def _sale_end_ms(product: dict) -> int | None:
 
 
 def _sale_end_str(product: dict) -> str:
-    """Latest discount end date from any variant (Unix ms), formatted; or "—" if none."""
+    """Latest discount end date and time from any variant (Unix ms), in Eastern (ET), 12-hour format; or "—" if none."""
     latest_ms = _sale_end_ms(product)
     if latest_ms is None:
         return "—"
     try:
-        dt = datetime.utcfromtimestamp(latest_ms / 1000.0)
-        return dt.strftime("%Y-%m-%d")
+        dt_utc = datetime.fromtimestamp(latest_ms / 1000.0, tz=timezone.utc)
+        dt_eastern = dt_utc.astimezone(ZoneInfo("America/New_York"))
+        return dt_eastern.strftime("%Y-%m-%d %I:%M %p ET")
     except (ValueError, OSError):
         return "—"
 
