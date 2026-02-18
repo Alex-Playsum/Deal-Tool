@@ -5,6 +5,7 @@ import math
 import os
 import queue
 import re
+import sys
 import threading
 import webbrowser
 from datetime import datetime, timezone
@@ -42,6 +43,7 @@ from tksheet import Sheet
 from steam_cache import clear as clear_steam_cache
 from steam_app_list import clear_app_list_cache, clear_name_resolution_cache
 from steam_appdetails_cache import clear as clear_steam_appdetails_cache
+from steamspy_client import clear_steamspy_cache
 from email_html import build_email_html
 from steam_client import fetch_app_details_full
 
@@ -225,6 +227,36 @@ def _apply_release_date_filter(
     return rows
 
 
+def _apply_publisher_filter(rows: list[dict], query: str) -> list[dict]:
+    """Filter rows by publisher containing query (case-insensitive). Empty query = no filter."""
+    q = (query or "").strip().lower()
+    if not q:
+        return rows
+    return [r for r in rows if q in ((r.get("steam_publisher") or "").strip().lower())]
+
+
+def _apply_developer_filter(rows: list[dict], query: str) -> list[dict]:
+    """Filter rows by developer containing query (case-insensitive). Empty query = no filter."""
+    q = (query or "").strip().lower()
+    if not q:
+        return rows
+    return [r for r in rows if q in ((r.get("steam_developer") or "").strip().lower())]
+
+
+def _apply_tags_filter(rows: list[dict], query: str) -> list[dict]:
+    """Filter rows by any tag containing query (case-insensitive). Empty query = no filter."""
+    q = (query or "").strip().lower()
+    if not q:
+        return rows
+    def matches(row):
+        tags = row.get("steam_tags")
+        if isinstance(tags, list):
+            return any(q in (str(t).strip().lower()) for t in tags if t)
+        s = (tags or "").strip().lower()
+        return q in s
+    return [r for r in rows if matches(r)]
+
+
 class Application:
     def __init__(self):
         self.root = tk.Tk()
@@ -346,16 +378,29 @@ class Application:
         ttk.Entry(filt_frame, textvariable=self.release_date_filter_value, width=28).grid(row=2, column=2, columnspan=2, sticky=tk.W, padx=(0, 4), pady=(8, 0))
         ttk.Label(filt_frame, text="(e.g. >=2020-01-01 or 2018-01-01..2022-12-31)").grid(row=2, column=4, columnspan=6, sticky=tk.W, padx=(0, 8), pady=(8, 0))
 
+        # Publisher, Developer, Tags (row 3)
+        ttk.Label(filt_frame, text="Publisher:").grid(row=3, column=0, sticky=tk.W, padx=(0, 4), pady=(8, 0))
+        self.tab2_publisher_filter_var = tk.StringVar(value="")
+        ttk.Entry(filt_frame, textvariable=self.tab2_publisher_filter_var, width=18).grid(row=3, column=1, sticky=tk.W, padx=(0, 8), pady=(8, 0))
+        ttk.Label(filt_frame, text="Developer:").grid(row=3, column=2, sticky=tk.W, padx=(16, 4), pady=(8, 0))
+        self.tab2_developer_filter_var = tk.StringVar(value="")
+        ttk.Entry(filt_frame, textvariable=self.tab2_developer_filter_var, width=18).grid(row=3, column=3, sticky=tk.W, padx=(0, 8), pady=(8, 0))
+        tags_frame = ttk.Frame(filt_frame)
+        tags_frame.grid(row=3, column=4, columnspan=3, sticky=tk.W, padx=(16, 0), pady=(8, 0))
+        ttk.Label(tags_frame, text="Tags:").pack(side=tk.LEFT, padx=(0, 4))
+        self.tab2_tags_filter_var = tk.StringVar(value="")
+        ttk.Entry(tags_frame, textvariable=self.tab2_tags_filter_var, width=22).pack(side=tk.LEFT)
+
         ttk.Label(tab2, text="Results (best rating first):").pack(anchor=tk.W, pady=(8, 4))
         self.tab2_sheet_frame = ttk.Frame(tab2)
         self.tab2_sheet_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
         self.tab2_sheet_frame.grid_columnconfigure(0, weight=1)
         self.tab2_sheet_frame.grid_rowconfigure(0, weight=1)
-        # Column width ratios (Game, Rating, Reviews, % Off, Release date, Sale end) - sum 1.0
-        self._tab2_column_ratios = [0.32, 0.20, 0.12, 0.08, 0.14, 0.14]
+        # Column width ratios (Game, Rating, Reviews, % Off, Release date, Sale end, Developer, Publisher, Tags) - sum 1.0
+        self._tab2_column_ratios = [0.22, 0.14, 0.08, 0.06, 0.10, 0.10, 0.12, 0.12, 0.08]
         self.tab2_sheet = Sheet(
             self.tab2_sheet_frame,
-            headers=["Game", "Rating", "Reviews", "% Off", "Release date", "Sale end"],
+            headers=["Game", "Rating", "Reviews", "% Off", "Release date", "Sale end", "Developer", "Publisher", "Tags"],
             show_row_index=False,
             show_x_scrollbar=True,
             show_y_scrollbar=True,
@@ -365,7 +410,7 @@ class Application:
             alternate_color="#F0F4F8",
         )
         # Center text in all columns except Game (column 0)
-        self.tab2_sheet.align_columns([1, 2, 3, 4, 5], align="center")
+        self.tab2_sheet.align_columns([1, 2, 3, 4, 5, 6, 7, 8], align="center")
         self.tab2_sheet.enable_bindings()
         self.tab2_sheet.bind("<Double-1>", self._on_tab2_sheet_double_click)
         self.tab2_sheet.grid(row=0, column=0, sticky="nswe")
@@ -999,7 +1044,10 @@ class Application:
         with tempfile.NamedTemporaryFile(mode="w", suffix=".html", delete=False, encoding="utf-8") as f:
             f.write(self._email_last_html)
             path = f.name
-        webbrowser.open("file://" + path.replace("\\", "/"))
+        if sys.platform == "win32":
+            os.startfile(path)
+        else:
+            webbrowser.open("file://" + path.replace("\\", "/"))
 
     def _get_selected_currencies(self) -> list[str]:
         return [c for c in ALL_CURRENCIES if self.currency_vars[c].get()]
@@ -1135,6 +1183,9 @@ class Application:
         )
         rows = _apply_game_search_filter(rows, search_query)
         rows = _apply_release_date_filter(rows, release_date_type, release_date_val)
+        rows = _apply_publisher_filter(rows, self.tab2_publisher_filter_var.get())
+        rows = _apply_developer_filter(rows, self.tab2_developer_filter_var.get())
+        rows = _apply_tags_filter(rows, self.tab2_tags_filter_var.get())
         self._populate_tab2_sheet(rows)
 
     def _resize_tab2_columns(self, event=None):
@@ -1185,7 +1236,14 @@ class Application:
             discount_str = _discount_str(r)
             release_str = _release_date_str(r)
             sale_end_str = _sale_end_str(r)
-            data.append([title, rating, reviews_str, discount_str, release_str, sale_end_str])
+            developer_str = (r.get("steam_developer") or "").strip() or "—"
+            publisher_str = (r.get("steam_publisher") or "").strip() or "—"
+            tags_raw = r.get("steam_tags")
+            if isinstance(tags_raw, list):
+                tags_str = ", ".join(str(t).strip() for t in tags_raw if t and str(t).strip()) or "—"
+            else:
+                tags_str = (tags_raw or "").strip() or "—"
+            data.append([title, rating, reviews_str, discount_str, release_str, sale_end_str, developer_str, publisher_str, tags_str])
         self.tab2_sheet.set_sheet_data(data)
         self._apply_tab2_color_scale(rows)
         self._resize_tab2_columns()
@@ -1261,7 +1319,7 @@ class Application:
         wb = Workbook()
         ws = wb.active
         ws.title = "Deal Finder"
-        headers = ["Game", "Rating", "Reviews", "% Off", "Release date", "Sale end"]
+        headers = ["Game", "Rating", "Reviews", "% Off", "Release date", "Sale end", "Developer", "Publisher", "Tags"]
         for col, h in enumerate(headers, start=1):
             ws.cell(row=1, column=col, value=h)
 
@@ -1284,7 +1342,14 @@ class Application:
             discount_str = _discount_str(r)
             release_str = _release_date_str(r)
             sale_end_str = _sale_end_str(r)
-            data_rows.append([title, rating, reviews_str, discount_str, release_str, sale_end_str])
+            developer_str = (r.get("steam_developer") or "").strip() or "—"
+            publisher_str = (r.get("steam_publisher") or "").strip() or "—"
+            tags_raw = r.get("steam_tags")
+            if isinstance(tags_raw, list):
+                tags_str = ", ".join(str(t).strip() for t in tags_raw if t and str(t).strip()) or "—"
+            else:
+                tags_str = (tags_raw or "").strip() or "—"
+            data_rows.append([title, rating, reviews_str, discount_str, release_str, sale_end_str, developer_str, publisher_str, tags_str])
             rating_vals.append(float(pct) if pct is not None else None)
             rev = r.get("steam_total_reviews")
             review_vals.append(math.log10(max(1, rev)) if rev and rev > 0 else None)
@@ -1323,7 +1388,8 @@ class Application:
         clear_app_list_cache()
         clear_steam_appdetails_cache()
         clear_name_resolution_cache()
-        messagebox.showinfo("Cache cleared", "Steam review, app list, appdetails, and name-resolution caches cleared.")
+        clear_steamspy_cache()
+        messagebox.showinfo("Cache cleared", "Steam review, app list, appdetails, name-resolution, and SteamSpy caches cleared.")
 
     def _build_table(self):
         if self._index is None:

@@ -96,8 +96,32 @@ def get_capsule_url(app_id: int | str, size: str) -> str | None:
     return urls.get(size)
 
 
+def get_developer(app_id: int | str) -> str | None:
+    """Return cached developer string for app_id, or None if missing/expired."""
+    data = _load_all()
+    key = str(app_id)
+    if key not in data:
+        return None
+    entry = data[key]
+    if _is_expired(entry.get("fetched_at", "")):
+        return None
+    return entry.get("developer")
+
+
+def get_publisher(app_id: int | str) -> str | None:
+    """Return cached publisher string for app_id, or None if missing/expired."""
+    data = _load_all()
+    key = str(app_id)
+    if key not in data:
+        return None
+    entry = data[key]
+    if _is_expired(entry.get("fetched_at", "")):
+        return None
+    return entry.get("publisher")
+
+
 def set(app_id: int | str, release_date: str | None) -> None:
-    """Store release_date for app_id with current timestamp (merge; keeps existing screenshots)."""
+    """Store release_date for app_id with current timestamp (merge; keeps existing screenshots, developer, publisher)."""
     data = _load_all()
     key = str(app_id)
     now = datetime.utcnow().isoformat() + "Z"
@@ -110,6 +134,8 @@ def set(app_id: int | str, release_date: str | None) -> None:
             "release_date": release_date,
             "screenshots": existing.get("screenshots") or [],
             "short_description": existing.get("short_description"),
+            "developer": existing.get("developer"),
+            "publisher": existing.get("publisher"),
             "fetched_at": now,
         }
     _save_all(data)
@@ -121,14 +147,18 @@ def set_full(
     screenshots: list[str],
     short_description: str | None = None,
     capsule_urls: dict | None = None,
+    developer: str | None = None,
+    publisher: str | None = None,
 ) -> None:
-    """Store full appdetails entry: release_date, screenshot path_full URLs, optional short_description, and optional capsule_urls dict (size -> URL)."""
+    """Store full appdetails entry: release_date, screenshots, short_description, capsule_urls, developer, publisher."""
     data = _load_all()
     data[str(app_id)] = {
         "release_date": release_date,
         "screenshots": list(screenshots),
         "short_description": short_description,
         "capsule_urls": dict(capsule_urls) if capsule_urls else {},
+        "developer": developer,
+        "publisher": publisher,
         "fetched_at": datetime.utcnow().isoformat() + "Z",
     }
     _save_all(data)

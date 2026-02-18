@@ -65,6 +65,11 @@ STEAM_MAPPING_PATH = os.path.join(_APP_DIR, "steam_app_ids.json")
 # Dedicated cache for name->appid resolution (normalized title -> app_id). Avoids re-resolving same games.
 STEAM_NAME_RESOLUTION_CACHE_PATH = os.path.join(_APP_DIR, "cache", "steam_name_resolution_cache.json")
 
+# SteamSpy API (no key); tags per app_id. Use {app_id} placeholder.
+STEAMSPY_APPDETAILS_URL = "https://steamspy.com/api.php?request=appdetails&appid={app_id}"
+STEAMSPY_CACHE_PATH = os.path.join(_APP_DIR, "cache", "steamspy_appdetails.json")
+STEAMSPY_CACHE_TTL_HOURS = 168  # 7 days
+
 # Steam review score labels -> minimum percent positive (for filter dropdown)
 STEAM_LABEL_MIN_PERCENT = {
     "Overwhelmingly Positive": 95,
