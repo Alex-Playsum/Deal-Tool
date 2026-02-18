@@ -480,6 +480,7 @@ class Application:
         export_frame = ttk.Frame(tab3)
         export_frame.pack(fill=tk.X)
         ttk.Button(export_frame, text="Load feed & build preview", command=self._email_build_preview).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(export_frame, text="Update preview", command=self._email_update_preview).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(export_frame, text="Export HTML…", command=self._email_export_html).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(export_frame, text="Open preview in browser", command=self._email_open_preview_browser).pack(side=tk.LEFT)
         self.email_status_var = tk.StringVar(value="")
@@ -928,6 +929,50 @@ class Application:
             _email_build_worker(self._worker_queue, index, params, blocks)
 
         threading.Thread(target=work, daemon=True).start()
+
+    def _email_update_preview(self):
+        """Rebuild email HTML from existing game pool and current blocks/options. No feed or Steam re-fetch."""
+        if not self._email_game_pool:
+            messagebox.showwarning("No preview", "Build preview first (Load feed & build preview), then you can use Update preview for quick changes.")
+            return
+        self.email_status_var.set("Updating…")
+        self.root.update()
+        try:
+            pool = self._email_game_pool
+            for p in pool:
+                end_ms = _sale_end_ms(p)
+                end_formatted = _format_offer_ends_est(end_ms)
+                p["sale_end_display"] = ("Offer ends " + end_formatted) if end_formatted else ""
+            currency = (self.email_currency_var.get() or "USD").strip() or "USD"
+            try:
+                coupon = max(0, min(50, float(self.email_coupon_var.get().strip() or 0)))
+            except ValueError:
+                coupon = 0
+            show_val = (self.email_show_var.get() or "price").strip().lower() or "price"
+            if show_val not in ("price", "discount", "both"):
+                show_val = "price"
+            options = {
+                "currency": currency,
+                "show_price": show_val in ("price", "both"),
+                "show_both": show_val == "both",
+                "coupon_percent": coupon,
+            }
+            def get_screenshots(app_id):
+                out = fetch_app_details_full(app_id, use_cache=True)
+                return (out or {}).get("screenshots") or []
+            html = build_email_html(
+                self._email_blocks,
+                pool,
+                options,
+                get_screenshots=get_screenshots,
+            )
+            self._email_last_html = html
+            self.email_status_var.set(f"Preview updated: {len(pool)} games, {len(self._email_blocks)} blocks (no feed refresh).")
+        except Exception as e:
+            self.email_status_var.set("")
+            messagebox.showerror("Error", str(e))
+            import traceback
+            traceback.print_exc()
 
     def _email_export_html(self):
         if not self._email_last_html:

@@ -77,7 +77,7 @@ def _display_discount_pct(product: dict, coupon_percent: float) -> str:
     if coupon_percent and coupon_percent > 0:
         base = base * (1 - coupon_percent / 100)
     pct = round((1 - base / orig) * 100)
-    return f"{pct}%"
+    return f"-{pct}%"
 
 
 def _original_price(product: dict, currency: str) -> str:
@@ -134,11 +134,15 @@ def _render_pricing_html(
 
 
 def _game_image_url(product: dict, image_source: str, capsule_size: str = "header") -> str | None:
-    """Image URL for a game: feed cover or Steam capsule. Fallback to feed if no steam_app_id."""
+    """Image URL for a game: feed cover or Steam capsule. Uses cached capsule URL when available."""
     if image_source == "steam_capsule":
         app_id = product.get("steam_app_id")
         if app_id is not None:
+            from steam_appdetails_cache import get_capsule_url
             from steam_images import get_steam_capsule_url
+            cached = get_capsule_url(app_id, capsule_size)
+            if cached:
+                return cached
             return get_steam_capsule_url(app_id, capsule_size)
     return product.get("cover_image") or None
 

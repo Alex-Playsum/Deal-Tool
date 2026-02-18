@@ -4,7 +4,7 @@ from datetime import datetime
 
 from config import STEAM_WEB_API_KEY
 from steam_app_list import get_app_list, resolve_name_to_app_id_cached
-from steam_client import fetch_app_reviews, fetch_app_details
+from steam_client import fetch_app_reviews, fetch_app_details_full
 
 
 def _is_on_sale(product: dict) -> bool:
@@ -123,11 +123,13 @@ def enrich_with_steam_reviews(
             rows.append(row)
             continue
         summary = fetch_app_reviews(app_id, use_cache=True)
+        details = fetch_app_details_full(app_id, use_cache=True)
+        release_date = details.get("release_date") if details else None
         if not summary:
             row["steam_percent_positive"] = None
             row["steam_review_desc"] = None
             row["steam_total_reviews"] = None
-            row["steam_release_date"] = fetch_app_details(app_id, use_cache=True)
+            row["steam_release_date"] = release_date
             rows.append(row)
             continue
         total_reviews = summary.get("total_reviews") or 0
@@ -138,7 +140,7 @@ def enrich_with_steam_reviews(
             row["steam_percent_positive"] = None
         row["steam_review_desc"] = (summary.get("review_score_desc") or "").strip() or None
         row["steam_total_reviews"] = total_reviews
-        row["steam_release_date"] = fetch_app_details(app_id, use_cache=True)
+        row["steam_release_date"] = release_date
         rows.append(row)
     if progress_callback:
         progress_callback(total, total)

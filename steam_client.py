@@ -10,9 +10,11 @@ from steam_appdetails_cache import (
     get as appdetails_cache_get,
     get_screenshots as appdetails_cache_get_screenshots,
     get_short_description as appdetails_cache_get_short_description,
+    has_entry as appdetails_cache_has_entry,
     set as appdetails_cache_set,
     set_full as appdetails_cache_set_full,
 )
+from steam_images import STEAM_CDN_BASE, STEAM_IMAGE_PATHS
 
 # Delay in seconds between requests when fetching many (be respectful to store)
 REQUEST_DELAY_SECONDS = 0.4
@@ -79,20 +81,28 @@ def fetch_app_details(app_id: int | str, use_cache: bool = True) -> str | None:
         return None
 
 
+def _build_capsule_urls(app_id: int) -> dict[str, str]:
+    """Build capsule/header CDN URLs for all sizes (same as steam_images)."""
+    urls = {}
+    for size, path_tpl in STEAM_IMAGE_PATHS.items():
+        rel = path_tpl.format(app_id=app_id)
+        url = STEAM_CDN_BASE + ("/" + rel if not rel.startswith("/") else rel)
+        urls[size] = url
+    return urls
+
+
 def fetch_app_details_full(app_id: int | str, use_cache: bool = True) -> dict | None:
     """
     Fetch appdetails and return { "release_date": str|None, "screenshots": [path_full URLs], "short_description": str|None }.
-    Caches result. screenshots are up to 4 path_full URLs from data.screenshots.
+    Caches result. Uses cache whenever we have a valid entry (not only when screenshots exist). Saves capsule_urls to cache.
     """
     app_id = int(app_id)
-    if use_cache:
-        cached_screens = appdetails_cache_get_screenshots(app_id, max_count=4)
-        if cached_screens:
-            return {
-                "release_date": appdetails_cache_get(app_id),
-                "screenshots": cached_screens,
-                "short_description": appdetails_cache_get_short_description(app_id),
-            }
+    if use_cache and appdetails_cache_has_entry(app_id):
+        return {
+            "release_date": appdetails_cache_get(app_id),
+            "screenshots": appdetails_cache_get_screenshots(app_id, max_count=4),
+            "short_description": appdetails_cache_get_short_description(app_id),
+        }
     url = STEAM_APPDETAILS_URL_TEMPLATE.format(app_id=app_id)
     try:
         resp = requests.get(url, timeout=15)
@@ -117,7 +127,8 @@ def fetch_app_details_full(app_id: int | str, use_cache: bool = True) -> dict | 
                     path = "https://cdn.cloudflare.steamstatic.com" + (path if path.startswith("/") else "/" + path)
                 screenshots.append(path)
         short_desc = (inner.get("short_description") or "").strip() or None
-        appdetails_cache_set_full(app_id, date_str, screenshots, short_description=short_desc)
+        capsule_urls = _build_capsule_urls(app_id)
+        appdetails_cache_set_full(app_id, date_str, screenshots, short_description=short_desc, capsule_urls=capsule_urls)
         time.sleep(REQUEST_DELAY_SECONDS)
         return {"release_date": date_str, "screenshots": screenshots, "short_description": short_desc}
     except (requests.RequestException, KeyError, TypeError):

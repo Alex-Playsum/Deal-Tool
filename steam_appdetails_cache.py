@@ -37,6 +37,15 @@ def _is_expired(fetched_at: str) -> bool:
     return (now - dt) > timedelta(hours=STEAM_APPDETAILS_CACHE_TTL_HOURS)
 
 
+def has_entry(app_id: int | str) -> bool:
+    """Return True if app_id has a valid (non-expired) cache entry."""
+    data = _load_all()
+    key = str(app_id)
+    if key not in data:
+        return False
+    return not _is_expired(data[key].get("fetched_at", ""))
+
+
 def get(app_id: int | str) -> str | None:
     """Return cached release_date string for app_id, or None if missing/expired."""
     data = _load_all()
@@ -74,6 +83,19 @@ def get_short_description(app_id: int | str) -> str | None:
     return entry.get("short_description")
 
 
+def get_capsule_url(app_id: int | str, size: str) -> str | None:
+    """Return cached capsule/header URL for app_id and size (header, capsule_sm, capsule_md, capsule_616x353), or None if missing/expired."""
+    data = _load_all()
+    key = str(app_id)
+    if key not in data:
+        return None
+    entry = data[key]
+    if _is_expired(entry.get("fetched_at", "")):
+        return None
+    urls = entry.get("capsule_urls") or {}
+    return urls.get(size)
+
+
 def set(app_id: int | str, release_date: str | None) -> None:
     """Store release_date for app_id with current timestamp (merge; keeps existing screenshots)."""
     data = _load_all()
@@ -98,13 +120,15 @@ def set_full(
     release_date: str | None,
     screenshots: list[str],
     short_description: str | None = None,
+    capsule_urls: dict | None = None,
 ) -> None:
-    """Store full appdetails entry: release_date, screenshot path_full URLs, and optional short_description."""
+    """Store full appdetails entry: release_date, screenshot path_full URLs, optional short_description, and optional capsule_urls dict (size -> URL)."""
     data = _load_all()
     data[str(app_id)] = {
         "release_date": release_date,
         "screenshots": list(screenshots),
         "short_description": short_description,
+        "capsule_urls": dict(capsule_urls) if capsule_urls else {},
         "fetched_at": datetime.utcnow().isoformat() + "Z",
     }
     _save_all(data)
