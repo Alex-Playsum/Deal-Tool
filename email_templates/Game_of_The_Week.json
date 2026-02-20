@@ -1,0 +1,60 @@
+{
+  "blocks": [
+    {
+      "type": "header",
+      "config": {
+        "title": "",
+        "logo_url": "https://app.playsum.live/playsum-logo-banner.png",
+        "link": "https://store.playsum.live/",
+        "view_in_browser_url": ""
+      }
+    },
+    {
+      "type": "title",
+      "config": {
+        "text": "Game of The Week"
+      }
+    },
+    {
+      "type": "featured",
+      "config": {
+        "image_source": "steam_capsule",
+        "capsule_size": "header",
+        "show_titles": true,
+        "show_rating": true,
+        "show_reviews": true,
+        "rating_style": "label",
+        "description": "",
+        "offer_ends": ""
+      }
+    },
+    {
+      "type": "button",
+      "config": {
+        "text": "SEE THE STORE PAGE",
+        "url": ""
+      }
+    },
+    {
+      "type": "game_screenshots",
+      "config": {
+        "game_index": 0,
+        "caption": ""
+      }
+    },
+    {
+      "type": "footer",
+      "config": {
+        "unsubscribe_url": "",
+        "privacy_url": "https://www.playsum.live/privacy",
+        "terms_url": "https://www.playsum.live/terms",
+        "address": "Playsum Inc. \u2022 251 Little Falls Drive, Wilmington, DE 19808"
+      }
+    }
+  ],
+  "display": {
+    "currency": "USD",
+    "show": "both",
+    "coupon_percent": 0
+  }
+}

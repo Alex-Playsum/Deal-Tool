@@ -434,13 +434,15 @@ def build_email_html(
     game_pool: list[dict],
     options: dict,
     get_screenshots: callable = None,
+    block_games: list[list[dict] | None] | None = None,
 ) -> str:
     """
     Build full email HTML from block list and game pool.
     blocks: list of { "type": "header"|"title"|"deal_list"|"featured"|"text"|"picture"|"button"|"game_screenshots"|"footer", "config": {...} }.
-    game_pool: list of product dicts (order: featured first, then deal list fill).
+    game_pool: list of product dicts (order: featured first, then deal list fill when block_games not used).
     options: { currency, show_price (True=price False=discount%), coupon_percent }.
     get_screenshots: optional callable(app_id) -> list of up to 4 image URLs for game_screenshots block.
+    block_games: optional list (same length as blocks); when block_games[i] is non-empty, use it for that block instead of sequential pool.
     """
     options = options or {}
     get_screenshots = get_screenshots or (lambda app_id: [])
@@ -456,18 +458,24 @@ def build_email_html(
         return g[0] if g else None
 
     fragments = []
-    for block in blocks:
+    for i, block in enumerate(blocks):
         btype = (block.get("type") or "").strip().lower()
         if btype == "header":
             fragments.append(_render_header(block))
         elif btype == "title":
             fragments.append(_render_title(block))
         elif btype == "deal_list":
-            count = int((block.get("config") or {}).get("games_count") or 4)
-            games = next_games(count)
+            if block_games and i < len(block_games) and block_games[i]:
+                games = block_games[i]
+            else:
+                count = int((block.get("config") or {}).get("games_count") or 4)
+                games = next_games(count)
             fragments.append(_render_deal_list(block, games, options))
         elif btype == "featured":
-            game = next_game()
+            if block_games and i < len(block_games) and block_games[i]:
+                game = block_games[i][0]
+            else:
+                game = next_game()
             fragments.append(_render_featured(block, game, options))
         elif btype == "text":
             fragments.append(_render_text(block))

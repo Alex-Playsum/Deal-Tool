@@ -28,7 +28,7 @@ from deal_filters import (
     parse_sale_end_value,
 )
 from feed_client import fetch_and_parse
-from product_index import items_to_index, resolve_urls_to_products
+from product_index import items_to_index, normalize_url, resolve_urls_to_products
 from table_builder import build_reddit_table
 from on_sale import (
     get_on_sale_products,
@@ -51,18 +51,43 @@ from steam_client import fetch_app_details_full
 EMAIL_TEMPLATES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "email_templates")
 
 
-def _email_build_worker(worker_queue: queue.Queue, index: dict, params: dict, blocks: list) -> None:
-    """Run in background thread: build game pool, enrich, build email HTML. Puts (done|error) on queue."""
+def _email_build_worker(
+    worker_queue: queue.Queue,
+    index: dict,
+    params: dict,
+    blocks: list,
+    pre_enriched_rows: list | None = None,
+) -> None:
+    """Run in background thread: build game pool, enrich, build email HTML. Puts (done|error) on queue.
+    When source is auto and pre_enriched_rows is set (in-memory cache from Deal Finder or previous build),
+    reuses it instead of re-fetching. When doing a full build, sends full_rows back so main thread can update _on_sale_rows."""
     def put(msg):
         worker_queue.put(msg)
+    full_rows_for_cache = None
     try:
         put(("progress", "email", "Getting game pool…"))
-        total = max(1, min(50, int((params.get("total") or "12").strip()) or 12))
         source = (params.get("source") or "auto").strip() or "auto"
         if source == "list":
             urls = parse_pasted_urls(params.get("urls_text") or "")
             products, _ = resolve_urls_to_products(index, urls)
-            pool = products[:total]
+            pool = list(products)
+        elif source == "auto" and pre_enriched_rows:
+            put(("progress", "email", "Using in-memory cache…"))
+            rows = [dict(r) for r in pre_enriched_rows]
+            rows = apply_deal_filters(
+                rows,
+                score_type=params.get("score_type") or "All",
+                score_value=params.get("score_value") or "",
+                label_value=params.get("label_value") or "",
+                min_reviews=params.get("min_reviews") or "",
+                discount_value=params.get("discount_value") or "",
+                sale_end_type=params.get("sale_end_type") or "All",
+                sale_end_value=params.get("sale_end_value") or "",
+            )
+            rows = _apply_publisher_filter(rows, params.get("publisher") or "")
+            rows = _apply_developer_filter(rows, params.get("developer") or "")
+            rows = _apply_tags_filter(rows, params.get("tags") or "")
+            pool = rows
         else:
             products = get_on_sale_products(index, resolve_steam_by_name=True)
             put(("progress", "email", "Fetching Steam data…"))
@@ -79,21 +104,24 @@ def _email_build_worker(worker_queue: queue.Queue, index: dict, params: dict, bl
                 sale_end_type=params.get("sale_end_type") or "All",
                 sale_end_value=params.get("sale_end_value") or "",
             )
-            pool = rows[:total]
+            rows = _apply_publisher_filter(rows, params.get("publisher") or "")
+            rows = _apply_developer_filter(rows, params.get("developer") or "")
+            rows = _apply_tags_filter(rows, params.get("tags") or "")
+            full_rows_for_cache = rows
+            pool = rows
         put(("progress", "email", "Enriching…"))
         for p in pool:
             end_ms = _sale_end_ms(p)
             end_formatted = _format_offer_ends_est(end_ms)
             p["sale_end_display"] = ("Offer ends " + end_formatted) if end_formatted else ""
-        try:
-            featured_count = max(0, min(len(pool), int((params.get("featured_count") or "0").strip() or "0")))
-        except ValueError:
-            featured_count = 0
-        for i in range(min(featured_count, len(pool))):
-            p = pool[i]
-            app_id = p.get("steam_app_id")
-            if app_id is not None and not (p.get("short_description") or "").strip():
-                details = fetch_app_details_full(app_id, use_cache=True)
+        block_games = _email_block_games(blocks, pool, index)
+        featured_games = []
+        for i, block in enumerate(blocks):
+            if (block.get("type") or "").strip().lower() == "featured" and block_games and i < len(block_games) and block_games[i]:
+                featured_games.extend(block_games[i])
+        for p in featured_games:
+            if p.get("steam_app_id") is not None and not (p.get("short_description") or "").strip():
+                details = fetch_app_details_full(p["steam_app_id"], use_cache=True)
                 if details and details.get("short_description"):
                     p["short_description"] = (details.get("short_description") or "").strip()
         put(("progress", "email", "Building HTML…"))
@@ -114,9 +142,9 @@ def _email_build_worker(worker_queue: queue.Queue, index: dict, params: dict, bl
         def get_screenshots(app_id):
             out = fetch_app_details_full(app_id, use_cache=True)
             return (out or {}).get("screenshots") or []
-        html = build_email_html(blocks, pool, options, get_screenshots=get_screenshots)
+        html = build_email_html(blocks, pool, options, get_screenshots=get_screenshots, block_games=block_games)
         status_msg = f"Preview built: {len(pool)} games, {len(blocks)} blocks."
-        put(("done", "email_build", (pool, html, status_msg)))
+        put(("done", "email_build", (pool, html, status_msg, full_rows_for_cache)))
     except Exception as e:
         put(("error", "email_build", e))
 
@@ -255,6 +283,54 @@ def _apply_tags_filter(rows: list[dict], query: str) -> list[dict]:
         s = (tags or "").strip().lower()
         return q in s
     return [r for r in rows if matches(r)]
+
+
+def _email_block_games(blocks: list[dict], pool: list[dict], index: dict | None = None) -> list[list[dict] | None]:
+    """Build per-block game lists from pool. Overrides: override_urls/override_url (resolve via index, match to pool by link), or legacy override_steam_ids/override_steam_id, else filter by block publisher/developer/tags."""
+    link_to_game = {normalize_url(g.get("link") or ""): g for g in pool if (g.get("link") or "").strip()}
+    result: list[list[dict] | None] = [None] * len(blocks)
+    for i, block in enumerate(blocks):
+        btype = (block.get("type") or "").strip().lower()
+        if btype not in ("deal_list", "featured"):
+            continue
+        cfg = block.get("config") or {}
+        if btype == "deal_list":
+            override_urls = cfg.get("override_urls")
+            if override_urls and index is not None:
+                products, _ = resolve_urls_to_products(index, override_urls)
+                result[i] = [link_to_game[normalize_url(p.get("link") or "")] for p in products if normalize_url(p.get("link") or "") in link_to_game]
+            else:
+                override_ids = cfg.get("override_steam_ids")
+                if override_ids:
+                    id_to_game = {g.get("steam_app_id"): g for g in pool if g.get("steam_app_id") is not None}
+                    result[i] = [id_to_game[aid] for aid in override_ids if aid in id_to_game]
+                else:
+                    filtered = list(pool)
+                    filtered = _apply_publisher_filter(filtered, (cfg.get("publisher") or "").strip())
+                    filtered = _apply_developer_filter(filtered, (cfg.get("developer") or "").strip())
+                    filtered = _apply_tags_filter(filtered, (cfg.get("tags") or "").strip())
+                    n = max(0, int((cfg.get("games_count") or 4)))
+                    result[i] = filtered[:n]
+        else:  # featured
+            override_url = (cfg.get("override_url") or "").strip()
+            if override_url and index is not None:
+                products, _ = resolve_urls_to_products(index, [override_url])
+                if products and normalize_url(products[0].get("link") or "") in link_to_game:
+                    result[i] = [link_to_game[normalize_url(products[0].get("link") or "")]]
+                else:
+                    result[i] = []
+            else:
+                override_id = cfg.get("override_steam_id")
+                if override_id is not None:
+                    found = [g for g in pool if g.get("steam_app_id") == override_id]
+                    result[i] = found[:1] if found else []
+                else:
+                    filtered = list(pool)
+                    filtered = _apply_publisher_filter(filtered, (cfg.get("publisher") or "").strip())
+                    filtered = _apply_developer_filter(filtered, (cfg.get("developer") or "").strip())
+                    filtered = _apply_tags_filter(filtered, (cfg.get("tags") or "").strip())
+                    result[i] = [filtered[0]] if filtered else []
+    return result
 
 
 class Application:
@@ -439,15 +515,6 @@ class Application:
         self.email_urls_text = scrolledtext.ScrolledText(tab3, height=3, width=70, wrap=tk.WORD)
         self.email_urls_text.pack(fill=tk.X, pady=(0, 8))
 
-        counts_frame = ttk.Frame(tab3)
-        counts_frame.pack(fill=tk.X)
-        ttk.Label(counts_frame, text="Total games:").grid(row=0, column=0, sticky=tk.W, padx=(0, 8))
-        self.email_total_games_var = tk.StringVar(value="12")
-        ttk.Spinbox(counts_frame, from_=1, to=50, width=6, textvariable=self.email_total_games_var).grid(row=0, column=1, sticky=tk.W, padx=(0, 16))
-        ttk.Label(counts_frame, text="Featured games:").grid(row=0, column=2, sticky=tk.W, padx=(0, 8))
-        self.email_featured_var = tk.StringVar(value="2")
-        ttk.Spinbox(counts_frame, from_=0, to=50, width=6, textvariable=self.email_featured_var).grid(row=0, column=3, sticky=tk.W)
-
         # Criteria (for auto-pick) - compact row
         ttk.Label(tab3, text="Criteria (auto-pick): Score, min reviews, % off, sale end").pack(anchor=tk.W, pady=(8, 4))
         crit_frame = ttk.Frame(tab3)
@@ -476,6 +543,15 @@ class Application:
         email_sale_end_combo.grid(row=0, column=9, sticky=tk.W, padx=(0, 4))
         self.email_sale_end_value = tk.StringVar(value="")
         ttk.Entry(crit_frame, textvariable=self.email_sale_end_value, width=14).grid(row=0, column=10, sticky=tk.W)
+        ttk.Label(crit_frame, text="Publisher:").grid(row=1, column=0, sticky=tk.W, padx=(0, 4), pady=(8, 0))
+        self.email_publisher_var = tk.StringVar(value="")
+        ttk.Entry(crit_frame, textvariable=self.email_publisher_var, width=14).grid(row=1, column=1, sticky=tk.W, padx=(0, 8), pady=(8, 0))
+        ttk.Label(crit_frame, text="Developer:").grid(row=1, column=2, sticky=tk.W, padx=(8, 4), pady=(8, 0))
+        self.email_developer_var = tk.StringVar(value="")
+        ttk.Entry(crit_frame, textvariable=self.email_developer_var, width=14).grid(row=1, column=3, sticky=tk.W, padx=(0, 8), pady=(8, 0))
+        ttk.Label(crit_frame, text="Tags:").grid(row=1, column=4, sticky=tk.W, padx=(8, 4), pady=(8, 0))
+        self.email_tags_var = tk.StringVar(value="")
+        ttk.Entry(crit_frame, textvariable=self.email_tags_var, width=18).grid(row=1, column=5, sticky=tk.W, padx=(0, 8), pady=(8, 0))
 
         # Display options
         ttk.Label(tab3, text="Display:").pack(anchor=tk.W, pady=(8, 4))
@@ -567,9 +643,9 @@ class Application:
     def _email_do_add_block(self, btype: str):
         block = {"type": btype, "config": {}}
         if btype == "deal_list":
-            block["config"] = {"games_count": 4, "image_source": "feed", "capsule_size": "header", "show_titles": True, "show_rating": False, "show_reviews": False, "rating_style": "percent"}
+            block["config"] = {"games_count": 4, "image_source": "feed", "capsule_size": "header", "show_titles": True, "show_rating": False, "show_reviews": False, "rating_style": "percent", "publisher": "", "developer": "", "tags": "", "override_urls": []}
         elif btype == "featured":
-            block["config"] = {"image_source": "feed", "capsule_size": "header", "show_titles": True, "show_rating": False, "show_reviews": False, "rating_style": "percent"}
+            block["config"] = {"image_source": "feed", "capsule_size": "header", "show_titles": True, "show_rating": False, "show_reviews": False, "rating_style": "percent", "publisher": "", "developer": "", "tags": "", "override_url": ""}
         elif btype == "game_screenshots":
             block["config"] = {}
         elif btype == "button":
@@ -668,6 +744,24 @@ class Application:
             entries["rating_style"] = tk.StringVar(value=cfg.get("rating_style") or "percent")
             ttk.Radiobutton(f, text="Rating as: %", variable=entries["rating_style"], value="percent").grid(row=8, column=1, sticky=tk.W, padx=(8, 0))
             ttk.Radiobutton(f, text="Rating as: label (e.g. Very Positive)", variable=entries["rating_style"], value="label").grid(row=9, column=1, sticky=tk.W, padx=(8, 0))
+            ttk.Label(f, text="Limit to (optional):").grid(row=10, column=0, sticky=tk.W, pady=(12, 2))
+            ttk.Label(f, text="Publisher:").grid(row=11, column=0, sticky=tk.W, padx=(0, 4))
+            entries["block_publisher"] = ttk.Entry(f, width=18)
+            entries["block_publisher"].insert(0, (cfg.get("publisher") or "").strip())
+            entries["block_publisher"].grid(row=11, column=1, sticky=tk.W, padx=(0, 8))
+            ttk.Label(f, text="Developer:").grid(row=11, column=2, sticky=tk.W, padx=(8, 4))
+            entries["block_developer"] = ttk.Entry(f, width=18)
+            entries["block_developer"].insert(0, (cfg.get("developer") or "").strip())
+            entries["block_developer"].grid(row=11, column=3, sticky=tk.W, padx=(0, 8))
+            ttk.Label(f, text="Tags:").grid(row=11, column=4, sticky=tk.W, padx=(8, 4))
+            entries["block_tags"] = ttk.Entry(f, width=16)
+            entries["block_tags"].insert(0, (cfg.get("tags") or "").strip())
+            entries["block_tags"].grid(row=11, column=5, sticky=tk.W, padx=(0, 8))
+            ttk.Label(f, text="Product URLs (one per line or comma-separated; empty = auto):").grid(row=12, column=0, sticky=tk.W, pady=(8, 2))
+            entries["override_urls_text"] = scrolledtext.ScrolledText(f, width=50, height=5, wrap=tk.WORD)
+            override_urls_dl = cfg.get("override_urls") or []
+            entries["override_urls_text"].insert("1.0", "\n".join(str(u) for u in override_urls_dl if u))
+            entries["override_urls_text"].grid(row=13, column=0, columnspan=6, sticky=tk.W, pady=(0, 4))
         elif btype == "featured":
             ttk.Label(f, text="Description:").grid(row=0, column=0, sticky=tk.W, pady=2)
             entries["description"] = scrolledtext.ScrolledText(f, width=40, height=4, wrap=tk.WORD)
@@ -695,6 +789,23 @@ class Application:
             entries["rating_style"] = tk.StringVar(value=cfg.get("rating_style") or "percent")
             ttk.Radiobutton(f, text="Rating as: %", variable=entries["rating_style"], value="percent").grid(row=8, column=1, sticky=tk.W, padx=(8, 0))
             ttk.Radiobutton(f, text="Rating as: label (e.g. Very Positive)", variable=entries["rating_style"], value="label").grid(row=9, column=1, sticky=tk.W, padx=(8, 0))
+            ttk.Label(f, text="Limit to (optional):").grid(row=10, column=0, sticky=tk.W, pady=(12, 2))
+            ttk.Label(f, text="Publisher:").grid(row=11, column=0, sticky=tk.W, padx=(0, 4))
+            entries["block_publisher_f"] = ttk.Entry(f, width=18)
+            entries["block_publisher_f"].insert(0, (cfg.get("publisher") or "").strip())
+            entries["block_publisher_f"].grid(row=11, column=1, sticky=tk.W, padx=(0, 8))
+            ttk.Label(f, text="Developer:").grid(row=11, column=2, sticky=tk.W, padx=(8, 4))
+            entries["block_developer_f"] = ttk.Entry(f, width=18)
+            entries["block_developer_f"].insert(0, (cfg.get("developer") or "").strip())
+            entries["block_developer_f"].grid(row=11, column=3, sticky=tk.W, padx=(0, 8))
+            ttk.Label(f, text="Tags:").grid(row=11, column=4, sticky=tk.W, padx=(8, 4))
+            entries["block_tags_f"] = ttk.Entry(f, width=16)
+            entries["block_tags_f"].insert(0, (cfg.get("tags") or "").strip())
+            entries["block_tags_f"].grid(row=11, column=5, sticky=tk.W, padx=(0, 8))
+            ttk.Label(f, text="Product URL (empty = auto):").grid(row=12, column=0, sticky=tk.W, pady=(8, 2))
+            entries["override_url_text"] = ttk.Entry(f, width=50)
+            entries["override_url_text"].insert(0, (cfg.get("override_url") or "").strip())
+            entries["override_url_text"].grid(row=13, column=0, columnspan=6, sticky=tk.W, pady=(0, 4))
         elif btype == "text":
             ttk.Label(f, text="Content (HTML allowed):").grid(row=0, column=0, sticky=tk.NW, pady=2)
             entries["content"] = scrolledtext.ScrolledText(f, width=50, height=6, wrap=tk.WORD)
@@ -769,6 +880,11 @@ class Application:
                 except ValueError:
                     new_cfg["games_count"] = 4
                 new_cfg["section_title"] = entries["section_title"].get().strip()
+                new_cfg["publisher"] = (entries.get("block_publisher") and entries["block_publisher"].get().strip()) or ""
+                new_cfg["developer"] = (entries.get("block_developer") and entries["block_developer"].get().strip()) or ""
+                new_cfg["tags"] = (entries.get("block_tags") and entries["block_tags"].get().strip()) or ""
+                urls_dl = parse_pasted_urls(entries.get("override_urls_text") and entries["override_urls_text"].get("1.0", tk.END) or "")
+                new_cfg["override_urls"] = urls_dl
                 new_cfg["image_source"] = entries["image_source"].get().strip() or "feed"
                 new_cfg["capsule_size"] = entries["capsule_size"].get().strip() or "header"
                 new_cfg["show_titles"] = entries["show_titles"].get()
@@ -779,6 +895,10 @@ class Application:
             elif btype == "featured":
                 new_cfg["description"] = entries["description"].get("1.0", tk.END).strip()
                 new_cfg["offer_ends"] = entries["offer_ends"].get().strip()
+                new_cfg["publisher"] = (entries.get("block_publisher_f") and entries["block_publisher_f"].get().strip()) or ""
+                new_cfg["developer"] = (entries.get("block_developer_f") and entries["block_developer_f"].get().strip()) or ""
+                new_cfg["tags"] = (entries.get("block_tags_f") and entries["block_tags_f"].get().strip()) or ""
+                new_cfg["override_url"] = (entries.get("override_url_text") and entries["override_url_text"].get().strip()) or ""
                 new_cfg["image_source"] = entries["image_source"].get().strip() or "feed"
                 new_cfg["capsule_size"] = entries["capsule_size"].get().strip() or "header"
                 new_cfg["show_titles"] = entries["show_titles"].get()
@@ -914,19 +1034,15 @@ class Application:
         ttk.Button(btn_frm, text="Cancel", command=win.destroy).pack(side=tk.LEFT)
 
     def _email_get_game_pool(self) -> list[dict]:
-        """Build game pool for email: from URL list or auto-pick with filters."""
+        """Build game pool for email: from URL list or auto-pick with filters (full list, no cap)."""
         if self._index is None:
             self._load_feed()
         if self._index is None:
             return []
-        try:
-            total = max(1, min(50, int(self.email_total_games_var.get().strip() or 12)))
-        except ValueError:
-            total = 12
         if self.email_source_var.get() == "list":
             urls = parse_pasted_urls(self.email_urls_text.get("1.0", tk.END))
             products, _ = resolve_urls_to_products(self._index, urls)
-            return products[:total]
+            return list(products)
         products = get_on_sale_products(self._index, resolve_steam_by_name=True)
         rows = enrich_with_steam_reviews(products, progress_callback=None)
         rows = apply_deal_filters(
@@ -939,7 +1055,10 @@ class Application:
             sale_end_type=self.email_sale_end_type.get(),
             sale_end_value=self.email_sale_end_value.get(),
         )
-        return rows[:total]
+        rows = _apply_publisher_filter(rows, self.email_publisher_var.get() or "")
+        rows = _apply_developer_filter(rows, self.email_developer_var.get() or "")
+        rows = _apply_tags_filter(rows, self.email_tags_var.get() or "")
+        return rows
 
     def _email_build_preview(self):
         if self._worker_busy:
@@ -953,7 +1072,6 @@ class Application:
         self.root.after(50, self._process_worker_queue)
         index = self._index
         params = {
-            "total": self.email_total_games_var.get(),
             "source": self.email_source_var.get(),
             "urls_text": self.email_urls_text.get("1.0", tk.END),
             "score_type": self.email_score_type.get(),
@@ -963,15 +1081,19 @@ class Application:
             "discount_value": self.email_discount_value.get(),
             "sale_end_type": self.email_sale_end_type.get(),
             "sale_end_value": self.email_sale_end_value.get(),
-            "featured_count": self.email_featured_var.get(),
+            "publisher": self.email_publisher_var.get(),
+            "developer": self.email_developer_var.get(),
+            "tags": self.email_tags_var.get(),
             "currency": self.email_currency_var.get(),
             "coupon": self.email_coupon_var.get(),
             "show_val": self.email_show_var.get(),
         }
         blocks = list(self._email_blocks)
+        source = (self.email_source_var.get() or "auto").strip() or "auto"
+        pre_enriched = self._on_sale_rows if (source == "auto" and self._on_sale_rows) else None
 
         def work():
-            _email_build_worker(self._worker_queue, index, params, blocks)
+            _email_build_worker(self._worker_queue, index, params, blocks, pre_enriched_rows=pre_enriched)
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -1005,11 +1127,13 @@ class Application:
             def get_screenshots(app_id):
                 out = fetch_app_details_full(app_id, use_cache=True)
                 return (out or {}).get("screenshots") or []
+            block_games = _email_block_games(self._email_blocks, pool, self._index)
             html = build_email_html(
                 self._email_blocks,
                 pool,
                 options,
                 get_screenshots=get_screenshots,
+                block_games=block_games,
             )
             self._email_last_html = html
             self.email_status_var.set(f"Preview updated: {len(pool)} games, {len(self._email_blocks)} blocks (no feed refresh).")
@@ -1077,10 +1201,30 @@ class Application:
                     self._apply_filters_tab2()
                     self.tab2_status.config(text=f"Done. {len(self._tab2_displayed_rows)} products (after filters).")
                 elif op == "email_build":
-                    pool, html, status_msg = payload
+                    pool, html, status_msg = payload[0], payload[1], payload[2]
                     self._email_game_pool = pool
                     self._email_last_html = html
                     self.email_status_var.set(status_msg)
+                    if len(payload) >= 4 and payload[3] is not None:
+                        self._on_sale_rows = payload[3]
+                    if self._index is not None:
+                        block_games = _email_block_games(self._email_blocks, pool, self._index)
+                        for i, block in enumerate(self._email_blocks):
+                            btype = (block.get("type") or "").strip().lower()
+                            if btype not in ("deal_list", "featured"):
+                                continue
+                            cfg = block.get("config") or {}
+                            if btype == "deal_list":
+                                if not cfg.get("override_urls"):
+                                    games = block_games[i] if block_games and i < len(block_games) else []
+                                    urls = [(g.get("link") or "").strip() for g in games if (g.get("link") or "").strip()]
+                                    if urls:
+                                        cfg["override_urls"] = urls
+                            else:
+                                if not (cfg.get("override_url") or "").strip():
+                                    games = block_games[i] if block_games and i < len(block_games) else []
+                                    if games and (games[0].get("link") or "").strip():
+                                        cfg["override_url"] = (games[0].get("link") or "").strip()
                 self._worker_busy = False
             elif kind == "error":
                 _, op, e = msg
