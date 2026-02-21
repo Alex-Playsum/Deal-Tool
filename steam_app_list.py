@@ -154,6 +154,11 @@ def _save_resolution_cache(cache: dict[str, int]) -> None:
     _memory_resolution = cache
 
 
+# Substring matches require the shorter string to be at least this fraction of the longer (by length).
+# Avoids false matches like "io" in "evolution" or "access" in "early access".
+_RESOLVE_SUBSTRING_MAJORITY = 0.5
+
+
 def _normalize_title(title: str) -> str:
     """Normalize for matching: lowercase, collapse spaces, remove some punctuation."""
     if not title:
@@ -197,10 +202,13 @@ def resolve_name_to_app_id(title: str, app_list: list[dict] | None = None) -> in
     for n, candidates in by_norm.items():
         if n == norm_title:
             return candidates[0][0]
-    # 3) Substring: product title contained in Steam name or vice versa
+    # 3) Substring: product title contained in Steam name or vice versa, only if majority of titles match
     for n, candidates in by_norm.items():
         if norm_title in n or n in norm_title:
-            return candidates[0][0]
+            shorter = min(len(n), len(norm_title))
+            longer = max(len(n), len(norm_title))
+            if longer > 0 and (shorter / longer) >= _RESOLVE_SUBSTRING_MAJORITY:
+                return candidates[0][0]
     return None
 
 

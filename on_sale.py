@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 from config import STEAM_WEB_API_KEY
 from steam_app_list import get_app_list, resolve_name_to_app_id_cached
 from steam_client import fetch_app_reviews, fetch_app_details_full
-from steamspy_client import fetch_steamspy_tags
+from steamspy_client import fetch_steamspy_appdetails
 
 
 def _is_on_sale(product: dict) -> bool:
@@ -127,6 +127,8 @@ def enrich_with_steam_reviews(
             row["steam_developer"] = None
             row["steam_publisher"] = None
             row["steam_tags"] = []
+            row["steamspy_owners_estimate"] = None
+            row["steamspy_ccu"] = None
             rows.append(row)
             continue
         summary = fetch_app_reviews(app_id, use_cache=True)
@@ -135,7 +137,10 @@ def enrich_with_steam_reviews(
         row["steam_release_date"] = release_date
         row["steam_developer"] = details.get("developer") if details else None
         row["steam_publisher"] = details.get("publisher") if details else None
-        row["steam_tags"] = fetch_steamspy_tags(app_id, use_cache=True)
+        steamspy = fetch_steamspy_appdetails(app_id, use_cache=True)
+        row["steam_tags"] = steamspy.get("tags") or []
+        row["steamspy_owners_estimate"] = steamspy.get("owners_estimate")
+        row["steamspy_ccu"] = steamspy.get("ccu")
         if not summary:
             row["steam_percent_positive"] = None
             row["steam_review_desc"] = None

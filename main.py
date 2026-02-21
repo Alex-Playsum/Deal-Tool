@@ -4,6 +4,7 @@ import json
 import math
 import os
 import queue
+import random
 import re
 import sys
 import threading
@@ -285,10 +286,63 @@ def _apply_tags_filter(rows: list[dict], query: str) -> list[dict]:
     return [r for r in rows if matches(r)]
 
 
+def _game_used_key(g: dict) -> str | tuple[str, int] | None:
+    """Return a hashable key for deduplication: normalized link or ('s', steam_app_id)."""
+    link = (g.get("link") or "").strip()
+    if link:
+        return normalize_url(link)
+    app_id = g.get("steam_app_id")
+    if app_id is not None:
+        return ("s", app_id)
+    return None
+
+
+def _game_pick_score(g: dict) -> float:
+    """Score for stratified weighted sampling: rating, reviews, discount, owners, ccu. Returns 0..1-ish."""
+    pct = g.get("steam_percent_positive")
+    rating = (float(pct) / 100.0) if pct is not None else 0.0
+    rev = g.get("steam_total_reviews") or 0
+    reviews = min(1.0, math.log10(1 + rev) / 6.0) if rev else 0.0
+    discount_pct = _discount_pct(g)
+    discount = min(1.0, (float(discount_pct or 0) / 100.0))
+    owners = g.get("steamspy_owners_estimate") or 0
+    owners_n = min(1.0, math.log10(1 + owners) / 8.0) if owners else 0.0
+    ccu = g.get("steamspy_ccu") or 0
+    ccu_n = min(1.0, math.log10(1 + ccu) / 5.0) if ccu else 0.0
+    return 0.25 * rating + 0.2 * reviews + 0.2 * discount + 0.2 * owners_n + 0.15 * ccu_n
+
+
+def _weighted_sample(games: list[dict], n: int, score_fn: callable) -> list[dict]:
+    """Sample n games without replacement; weights = score_fn(g). Criteria already applied to games."""
+    if n <= 0 or not games:
+        return []
+    if n >= len(games):
+        return list(games)
+    work = [(g, max(1e-6, score_fn(g))) for g in games]
+    out = []
+    for _ in range(n):
+        if not work:
+            break
+        total = sum(w for _, w in work)
+        if total <= 0:
+            break
+        r = random.random() * total
+        for idx, (game, w) in enumerate(work):
+            r -= w
+            if r <= 0:
+                out.append(game)
+                work.pop(idx)
+                break
+        else:
+            out.append(work.pop(-1)[0])
+    return out
+
+
 def _email_block_games(blocks: list[dict], pool: list[dict], index: dict | None = None) -> list[list[dict] | None]:
-    """Build per-block game lists from pool. Overrides: override_urls/override_url (resolve via index, match to pool by link), or legacy override_steam_ids/override_steam_id, else filter by block publisher/developer/tags."""
+    """Build per-block game lists from pool. No game appears twice in the email: used set tracks assignments across blocks."""
     link_to_game = {normalize_url(g.get("link") or ""): g for g in pool if (g.get("link") or "").strip()}
     result: list[list[dict] | None] = [None] * len(blocks)
+    used: set = set()
     for i, block in enumerate(blocks):
         btype = (block.get("type") or "").strip().lower()
         if btype not in ("deal_list", "featured"):
@@ -309,8 +363,13 @@ def _email_block_games(blocks: list[dict], pool: list[dict], index: dict | None 
                     filtered = _apply_publisher_filter(filtered, (cfg.get("publisher") or "").strip())
                     filtered = _apply_developer_filter(filtered, (cfg.get("developer") or "").strip())
                     filtered = _apply_tags_filter(filtered, (cfg.get("tags") or "").strip())
+                    filtered = [g for g in filtered if _game_used_key(g) not in used]
                     n = max(0, int((cfg.get("games_count") or 4)))
-                    result[i] = filtered[:n]
+                    result[i] = _weighted_sample(filtered, n, _game_pick_score)
+            for g in result[i] or []:
+                k = _game_used_key(g)
+                if k is not None:
+                    used.add(k)
         else:  # featured
             override_url = (cfg.get("override_url") or "").strip()
             if override_url and index is not None:
@@ -329,7 +388,12 @@ def _email_block_games(blocks: list[dict], pool: list[dict], index: dict | None 
                     filtered = _apply_publisher_filter(filtered, (cfg.get("publisher") or "").strip())
                     filtered = _apply_developer_filter(filtered, (cfg.get("developer") or "").strip())
                     filtered = _apply_tags_filter(filtered, (cfg.get("tags") or "").strip())
-                    result[i] = [filtered[0]] if filtered else []
+                    filtered = [g for g in filtered if _game_used_key(g) not in used]
+                    result[i] = _weighted_sample(filtered, 1, _game_pick_score)
+            for g in result[i] or []:
+                k = _game_used_key(g)
+                if k is not None:
+                    used.add(k)
     return result
 
 
@@ -934,6 +998,16 @@ class Application:
             win.destroy()
 
         ttk.Button(win, text="Save", command=save).pack(pady=(10, 0))
+        win.update_idletasks()
+        w = win.winfo_reqwidth()
+        h = win.winfo_reqheight()
+        root_x = self.root.winfo_x()
+        root_y = self.root.winfo_y()
+        root_w = self.root.winfo_width()
+        root_h = self.root.winfo_height()
+        x = root_x + max(0, (root_w - w) // 2)
+        y = root_y + max(0, (root_h - h) // 2)
+        win.geometry(f"+{x}+{y}")
 
     def _email_save_template(self):
         """Save current blocks and display options as a named template (Option A: one JSON file per template)."""
