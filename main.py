@@ -702,6 +702,8 @@ class Application:
             return f"Title: {(cfg.get('text') or '')[:30]}…" if (cfg.get("text") or "").strip() else "Title"
         if btype == "button":
             return f"Button: {(cfg.get('text') or 'View more')[:20]}"
+        if btype == "image_row":
+            return "Image row (3 links)"
         return btype.capitalize()
 
     def _email_refresh_listbox(self):
@@ -710,7 +712,7 @@ class Application:
             self.email_block_listbox.insert(tk.END, self._email_block_label(b))
 
     def _email_add_block(self):
-        types = ["header", "title", "deal_list", "featured", "text", "picture", "button", "game_screenshots", "footer"]
+        types = ["header", "title", "deal_list", "featured", "text", "picture", "image_row", "button", "game_screenshots", "footer"]
         menu = tk.Menu(self.root, tearoff=0)
         for t in types:
             menu.add_command(label=t.replace("_", " ").title(), command=lambda bt=t: self._email_do_add_block(bt))
@@ -727,6 +729,8 @@ class Application:
             block["config"] = {"image_source": "feed", "capsule_size": "header", "show_titles": True, "show_rating": False, "show_reviews": False, "rating_style": "percent", "publisher": "", "developer": "", "tags": "", "price_value": "", "discount_value": "", "override_url": ""}
         elif btype == "game_screenshots":
             block["config"] = {}
+        elif btype == "image_row":
+            block["config"] = {"section_title": "", "image_1": "", "link_1": "", "alt_1": "", "image_2": "", "link_2": "", "alt_2": "", "image_3": "", "link_3": "", "alt_3": ""}
         elif btype == "button":
             block["config"] = {"text": "View more", "url": ""}
         self._email_blocks.append(block)
@@ -921,6 +925,47 @@ class Application:
             entries["alt"] = ttk.Entry(f, width=30)
             entries["alt"].insert(0, cfg.get("alt") or "")
             entries["alt"].grid(row=2, column=1, sticky=tk.W, pady=2, padx=(4, 0))
+        elif btype == "image_row":
+            ttk.Label(f, text="Section title (optional):").grid(row=0, column=0, sticky=tk.W, pady=2)
+            entries["section_title"] = ttk.Entry(f, width=40)
+            entries["section_title"].insert(0, (cfg.get("section_title") or "").strip())
+            entries["section_title"].grid(row=0, column=1, sticky=tk.W, pady=2, padx=(4, 0))
+            ttk.Label(f, text="Image 1 URL:").grid(row=1, column=0, sticky=tk.W, pady=2)
+            entries["image_1"] = ttk.Entry(f, width=50)
+            entries["image_1"].insert(0, (cfg.get("image_1") or "").strip())
+            entries["image_1"].grid(row=1, column=1, sticky=tk.W, pady=2, padx=(4, 0))
+            ttk.Label(f, text="Link 1 URL:").grid(row=2, column=0, sticky=tk.W, pady=2)
+            entries["link_1"] = ttk.Entry(f, width=50)
+            entries["link_1"].insert(0, (cfg.get("link_1") or "").strip())
+            entries["link_1"].grid(row=2, column=1, sticky=tk.W, pady=2, padx=(4, 0))
+            ttk.Label(f, text="Alt 1 (optional):").grid(row=3, column=0, sticky=tk.W, pady=2)
+            entries["alt_1"] = ttk.Entry(f, width=30)
+            entries["alt_1"].insert(0, (cfg.get("alt_1") or "").strip())
+            entries["alt_1"].grid(row=3, column=1, sticky=tk.W, pady=2, padx=(4, 0))
+            ttk.Label(f, text="Image 2 URL:").grid(row=4, column=0, sticky=tk.W, pady=(8, 2))
+            entries["image_2"] = ttk.Entry(f, width=50)
+            entries["image_2"].insert(0, (cfg.get("image_2") or "").strip())
+            entries["image_2"].grid(row=4, column=1, sticky=tk.W, pady=(8, 2), padx=(4, 0))
+            ttk.Label(f, text="Link 2 URL:").grid(row=5, column=0, sticky=tk.W, pady=2)
+            entries["link_2"] = ttk.Entry(f, width=50)
+            entries["link_2"].insert(0, (cfg.get("link_2") or "").strip())
+            entries["link_2"].grid(row=5, column=1, sticky=tk.W, pady=2, padx=(4, 0))
+            ttk.Label(f, text="Alt 2 (optional):").grid(row=6, column=0, sticky=tk.W, pady=2)
+            entries["alt_2"] = ttk.Entry(f, width=30)
+            entries["alt_2"].insert(0, (cfg.get("alt_2") or "").strip())
+            entries["alt_2"].grid(row=6, column=1, sticky=tk.W, pady=2, padx=(4, 0))
+            ttk.Label(f, text="Image 3 URL:").grid(row=7, column=0, sticky=tk.W, pady=(8, 2))
+            entries["image_3"] = ttk.Entry(f, width=50)
+            entries["image_3"].insert(0, (cfg.get("image_3") or "").strip())
+            entries["image_3"].grid(row=7, column=1, sticky=tk.W, pady=(8, 2), padx=(4, 0))
+            ttk.Label(f, text="Link 3 URL:").grid(row=8, column=0, sticky=tk.W, pady=2)
+            entries["link_3"] = ttk.Entry(f, width=50)
+            entries["link_3"].insert(0, (cfg.get("link_3") or "").strip())
+            entries["link_3"].grid(row=8, column=1, sticky=tk.W, pady=2, padx=(4, 0))
+            ttk.Label(f, text="Alt 3 (optional):").grid(row=9, column=0, sticky=tk.W, pady=2)
+            entries["alt_3"] = ttk.Entry(f, width=30)
+            entries["alt_3"].insert(0, (cfg.get("alt_3") or "").strip())
+            entries["alt_3"].grid(row=9, column=1, sticky=tk.W, pady=2, padx=(4, 0))
         elif btype == "button":
             ttk.Label(f, text="Button text:").grid(row=0, column=0, sticky=tk.W, pady=2)
             entries["text"] = ttk.Entry(f, width=30)
@@ -1013,6 +1058,17 @@ class Application:
                 new_cfg["image_url"] = entries["image_url"].get().strip()
                 new_cfg["link_url"] = entries["link_url"].get().strip()
                 new_cfg["alt"] = entries["alt"].get().strip()
+            elif btype == "image_row":
+                new_cfg["section_title"] = (entries.get("section_title") and entries["section_title"].get().strip()) or ""
+                new_cfg["image_1"] = (entries.get("image_1") and entries["image_1"].get().strip()) or ""
+                new_cfg["link_1"] = (entries.get("link_1") and entries["link_1"].get().strip()) or ""
+                new_cfg["alt_1"] = (entries.get("alt_1") and entries["alt_1"].get().strip()) or ""
+                new_cfg["image_2"] = (entries.get("image_2") and entries["image_2"].get().strip()) or ""
+                new_cfg["link_2"] = (entries.get("link_2") and entries["link_2"].get().strip()) or ""
+                new_cfg["alt_2"] = (entries.get("alt_2") and entries["alt_2"].get().strip()) or ""
+                new_cfg["image_3"] = (entries.get("image_3") and entries["image_3"].get().strip()) or ""
+                new_cfg["link_3"] = (entries.get("link_3") and entries["link_3"].get().strip()) or ""
+                new_cfg["alt_3"] = (entries.get("alt_3") and entries["alt_3"].get().strip()) or ""
             elif btype == "button":
                 new_cfg["text"] = entries["text"].get().strip() or "View more"
                 new_cfg["url"] = entries["url"].get().strip()

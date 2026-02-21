@@ -361,6 +361,40 @@ def _render_picture(block: dict) -> str:
 </table>'''
 
 
+def _render_image_row(block: dict) -> str:
+    """Render 3 small images in a row; each has image URL and link URL. Optional section title above."""
+    cfg = block.get("config") or {}
+    has_any = any((cfg.get(f"image_{i}") or "").strip() for i in range(1, 4))
+    if not has_any:
+        return ""
+    section_title = (cfg.get("section_title") or "").strip()
+    cell_style = "width:33%;padding:4px 6px;vertical-align:top;"
+    cells = []
+    for i in range(1, 4):
+        img_url = (cfg.get(f"image_{i}") or "").strip()
+        link = (cfg.get(f"link_{i}") or "").strip()
+        alt = (cfg.get(f"alt_{i}") or "").strip()
+        if img_url:
+            img = f'<img src="{html_module.escape(img_url)}" alt="{html_module.escape(alt)}" style="width:100%;max-width:100%;height:auto;display:block;border:0;" />'
+            content = f'<a href="{html_module.escape(link)}">{img}</a>' if link else img
+        else:
+            content = ""
+        cells.append(f'<td style="{cell_style}" align="center">{content}</td>')
+    row_html = f"<tr>{cells[0]}{cells[1]}{cells[2]}</tr>"
+    title_row = ""
+    if section_title:
+        title_row = f'<tr><td colspan="3" style="padding-bottom:12px;"><span style="font-size:18px;font-weight:bold;color:{TEXT_PRIMARY};">{html_module.escape(section_title)}</span></td></tr>'
+    return f'''
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="{_block_wrapper_style()}">
+  <tr><td style="{_block_cell_style()}">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+      {title_row}
+      {row_html}
+    </table>
+  </td></tr>
+</table>'''
+
+
 def _render_button(block: dict) -> str:
     cfg = block.get("config") or {}
     text = (cfg.get("text") or "View more").strip()
@@ -481,6 +515,8 @@ def build_email_html(
             fragments.append(_render_text(block))
         elif btype == "picture":
             fragments.append(_render_picture(block))
+        elif btype == "image_row":
+            fragments.append(_render_image_row(block))
         elif btype == "button":
             fragments.append(_render_button(block))
         elif btype == "game_screenshots":
