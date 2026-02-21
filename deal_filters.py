@@ -4,7 +4,7 @@ import re
 from datetime import datetime, timezone
 
 from config import STEAM_LABEL_MIN_PERCENT
-from on_sale import _discount_pct, _sale_end_ms
+from on_sale import _discount_pct, _price_for_currency, _sale_end_ms
 
 
 _ONE_DAY_MS = 86400 * 1000
@@ -162,6 +162,37 @@ def apply_discount_filter(rows: list[dict], value_str: str) -> list[dict]:
     return [r for r in rows if ok(r)]
 
 
+def apply_price_filter(rows: list[dict], value_str: str, currency: str = "USD") -> list[dict]:
+    """Filter rows by current price (discount or original) in currency. Operator + number (e.g. <6, <=10). Empty = no filter."""
+    s = (value_str or "").strip()
+    if not s:
+        return rows
+    m = re.match(r"^(>=?|<=?|==?|!=)\s*(\d+(?:\.\d+)?)$", s)
+    if not m:
+        return rows
+    op, num = m.group(1), float(m.group(2))
+
+    def ok(row):
+        price = _price_for_currency(row, currency)
+        if price is None:
+            return False
+        if op == ">":
+            return price > num
+        if op == ">=":
+            return price >= num
+        if op == "<":
+            return price < num
+        if op == "<=":
+            return price <= num
+        if op == "==":
+            return price == num
+        if op == "!=":
+            return price != num
+        return False
+
+    return [r for r in rows if ok(r)]
+
+
 def apply_sale_end_filter(
     rows: list[dict],
     filter_type: str,
@@ -234,6 +265,8 @@ def apply_deal_filters(
     label_value: str = "",
     min_reviews: str = "",
     discount_value: str = "",
+    price_value: str = "",
+    currency: str = "USD",
     sale_end_type: str = "All",
     sale_end_value: str = "",
 ) -> list[dict]:
@@ -243,6 +276,7 @@ def apply_deal_filters(
     rows = apply_score_filter(rows, score_type, score_value, label_value)
     rows = apply_reviews_filter(rows, min_reviews)
     rows = apply_discount_filter(rows, discount_value)
+    rows = apply_price_filter(rows, price_value, currency)
     rows = apply_sale_end_filter(rows, sale_end_type, sale_end_value)
     return rows
 

@@ -42,6 +42,29 @@ def _discount_str(product: dict) -> str:
     return f"{best}%" if best is not None else ""
 
 
+def _price_for_currency(product: dict, currency: str) -> float | None:
+    """Current price for a currency: discountPrice if present else originalPrice. Returns None if no variant."""
+    variants = product.get("variants_by_currency") or {}
+    v = variants.get(currency) if currency else None
+    if not v and variants:
+        v = next(iter(variants.values()), None)
+    if not v:
+        return None
+    raw = v.get("discountPrice")
+    if raw is not None:
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            pass
+    raw = v.get("originalPrice")
+    if raw is not None:
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
 def _sale_end_ms(product: dict) -> int | None:
     """Latest discount end timestamp (Unix ms) from any variant, or None if none."""
     variants = product.get("variants_by_currency") or {}

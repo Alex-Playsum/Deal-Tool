@@ -24,6 +24,8 @@ from config import (
 )
 from deal_filters import (
     apply_deal_filters,
+    apply_discount_filter,
+    apply_price_filter,
     date_str_to_start_of_day_ms,
     ONE_DAY_MS,
     parse_sale_end_value,
@@ -68,6 +70,7 @@ def _email_build_worker(
     try:
         put(("progress", "email", "Getting game pool…"))
         source = (params.get("source") or "auto").strip() or "auto"
+        currency = (params.get("currency") or "USD").strip() or "USD"
         if source == "list":
             urls = parse_pasted_urls(params.get("urls_text") or "")
             products, _ = resolve_urls_to_products(index, urls)
@@ -75,6 +78,7 @@ def _email_build_worker(
         elif source == "auto" and pre_enriched_rows:
             put(("progress", "email", "Using in-memory cache…"))
             rows = [dict(r) for r in pre_enriched_rows]
+            currency = (params.get("currency") or "USD").strip() or "USD"
             rows = apply_deal_filters(
                 rows,
                 score_type=params.get("score_type") or "All",
@@ -82,6 +86,8 @@ def _email_build_worker(
                 label_value=params.get("label_value") or "",
                 min_reviews=params.get("min_reviews") or "",
                 discount_value=params.get("discount_value") or "",
+                price_value=params.get("price_value") or "",
+                currency=currency,
                 sale_end_type=params.get("sale_end_type") or "All",
                 sale_end_value=params.get("sale_end_value") or "",
             )
@@ -102,6 +108,8 @@ def _email_build_worker(
                 label_value=params.get("label_value") or "",
                 min_reviews=params.get("min_reviews") or "",
                 discount_value=params.get("discount_value") or "",
+                price_value=params.get("price_value") or "",
+                currency=currency,
                 sale_end_type=params.get("sale_end_type") or "All",
                 sale_end_value=params.get("sale_end_value") or "",
             )
@@ -115,7 +123,7 @@ def _email_build_worker(
             end_ms = _sale_end_ms(p)
             end_formatted = _format_offer_ends_est(end_ms)
             p["sale_end_display"] = ("Offer ends " + end_formatted) if end_formatted else ""
-        block_games = _email_block_games(blocks, pool, index)
+        block_games = _email_block_games(blocks, pool, index, currency=currency)
         featured_games = []
         for i, block in enumerate(blocks):
             if (block.get("type") or "").strip().lower() == "featured" and block_games and i < len(block_games) and block_games[i]:
@@ -338,7 +346,7 @@ def _weighted_sample(games: list[dict], n: int, score_fn: callable) -> list[dict
     return out
 
 
-def _email_block_games(blocks: list[dict], pool: list[dict], index: dict | None = None) -> list[list[dict] | None]:
+def _email_block_games(blocks: list[dict], pool: list[dict], index: dict | None = None, currency: str = "USD") -> list[list[dict] | None]:
     """Build per-block game lists from pool. No game appears twice in the email: used set tracks assignments across blocks."""
     link_to_game = {normalize_url(g.get("link") or ""): g for g in pool if (g.get("link") or "").strip()}
     result: list[list[dict] | None] = [None] * len(blocks)
@@ -363,6 +371,8 @@ def _email_block_games(blocks: list[dict], pool: list[dict], index: dict | None 
                     filtered = _apply_publisher_filter(filtered, (cfg.get("publisher") or "").strip())
                     filtered = _apply_developer_filter(filtered, (cfg.get("developer") or "").strip())
                     filtered = _apply_tags_filter(filtered, (cfg.get("tags") or "").strip())
+                    filtered = apply_price_filter(filtered, (cfg.get("price_value") or "").strip(), currency)
+                    filtered = apply_discount_filter(filtered, (cfg.get("discount_value") or "").strip())
                     filtered = [g for g in filtered if _game_used_key(g) not in used]
                     n = max(0, int((cfg.get("games_count") or 4)))
                     result[i] = _weighted_sample(filtered, n, _game_pick_score)
@@ -388,6 +398,8 @@ def _email_block_games(blocks: list[dict], pool: list[dict], index: dict | None 
                     filtered = _apply_publisher_filter(filtered, (cfg.get("publisher") or "").strip())
                     filtered = _apply_developer_filter(filtered, (cfg.get("developer") or "").strip())
                     filtered = _apply_tags_filter(filtered, (cfg.get("tags") or "").strip())
+                    filtered = apply_price_filter(filtered, (cfg.get("price_value") or "").strip(), currency)
+                    filtered = apply_discount_filter(filtered, (cfg.get("discount_value") or "").strip())
                     filtered = [g for g in filtered if _game_used_key(g) not in used]
                     result[i] = _weighted_sample(filtered, 1, _game_pick_score)
             for g in result[i] or []:
@@ -616,6 +628,9 @@ class Application:
         ttk.Label(crit_frame, text="Tags:").grid(row=1, column=4, sticky=tk.W, padx=(8, 4), pady=(8, 0))
         self.email_tags_var = tk.StringVar(value="")
         ttk.Entry(crit_frame, textvariable=self.email_tags_var, width=18).grid(row=1, column=5, sticky=tk.W, padx=(0, 8), pady=(8, 0))
+        ttk.Label(crit_frame, text="Price (e.g. <6):").grid(row=1, column=6, sticky=tk.W, padx=(8, 4), pady=(8, 0))
+        self.email_price_value = tk.StringVar(value="")
+        ttk.Entry(crit_frame, textvariable=self.email_price_value, width=10).grid(row=1, column=7, sticky=tk.W, padx=(0, 8), pady=(8, 0))
 
         # Display options
         ttk.Label(tab3, text="Display:").pack(anchor=tk.W, pady=(8, 4))
@@ -707,9 +722,9 @@ class Application:
     def _email_do_add_block(self, btype: str):
         block = {"type": btype, "config": {}}
         if btype == "deal_list":
-            block["config"] = {"games_count": 4, "image_source": "feed", "capsule_size": "header", "show_titles": True, "show_rating": False, "show_reviews": False, "rating_style": "percent", "publisher": "", "developer": "", "tags": "", "override_urls": []}
+            block["config"] = {"games_count": 4, "image_source": "feed", "capsule_size": "header", "show_titles": True, "show_rating": False, "show_reviews": False, "rating_style": "percent", "publisher": "", "developer": "", "tags": "", "price_value": "", "discount_value": "", "override_urls": []}
         elif btype == "featured":
-            block["config"] = {"image_source": "feed", "capsule_size": "header", "show_titles": True, "show_rating": False, "show_reviews": False, "rating_style": "percent", "publisher": "", "developer": "", "tags": "", "override_url": ""}
+            block["config"] = {"image_source": "feed", "capsule_size": "header", "show_titles": True, "show_rating": False, "show_reviews": False, "rating_style": "percent", "publisher": "", "developer": "", "tags": "", "price_value": "", "discount_value": "", "override_url": ""}
         elif btype == "game_screenshots":
             block["config"] = {}
         elif btype == "button":
@@ -822,12 +837,20 @@ class Application:
             entries["block_tags"] = ttk.Entry(f, width=16)
             entries["block_tags"].insert(0, (cfg.get("tags") or "").strip())
             entries["block_tags"].grid(row=11, column=5, sticky=tk.W, padx=(0, 4))
+            ttk.Label(f, text="Price (e.g. <6):").grid(row=12, column=0, sticky=tk.W, pady=(8, 2))
+            entries["block_price_value"] = ttk.Entry(f, width=10)
+            entries["block_price_value"].insert(0, (cfg.get("price_value") or "").strip())
+            entries["block_price_value"].grid(row=12, column=1, sticky=tk.W, padx=(4, 0))
+            ttk.Label(f, text="% off (e.g. >50):").grid(row=12, column=2, sticky=tk.W, padx=(8, 4), pady=(8, 2))
+            entries["block_discount_value"] = ttk.Entry(f, width=10)
+            entries["block_discount_value"].insert(0, (cfg.get("discount_value") or "").strip())
+            entries["block_discount_value"].grid(row=12, column=3, sticky=tk.W, padx=(4, 0))
             url_lbl = ttk.Label(f, text="Product URLs (one per line or comma-separated; empty = auto):", wraplength=250)
-            url_lbl.grid(row=12, column=0, sticky=tk.W, pady=(8, 2))
+            url_lbl.grid(row=13, column=0, sticky=tk.W, pady=(8, 2))
             entries["override_urls_text"] = scrolledtext.ScrolledText(f, width=50, height=5, wrap=tk.WORD)
             override_urls_dl = cfg.get("override_urls") or []
             entries["override_urls_text"].insert("1.0", "\n".join(str(u) for u in override_urls_dl if u))
-            entries["override_urls_text"].grid(row=13, column=0, columnspan=6, sticky=tk.W, pady=(0, 4))
+            entries["override_urls_text"].grid(row=14, column=0, columnspan=6, sticky=tk.W, pady=(0, 4))
         elif btype == "featured":
             ttk.Label(f, text="Description:").grid(row=0, column=0, sticky=tk.W, pady=2)
             entries["description"] = scrolledtext.ScrolledText(f, width=40, height=4, wrap=tk.WORD)
@@ -868,10 +891,18 @@ class Application:
             entries["block_tags_f"] = ttk.Entry(f, width=16)
             entries["block_tags_f"].insert(0, (cfg.get("tags") or "").strip())
             entries["block_tags_f"].grid(row=11, column=5, sticky=tk.W, padx=(0, 4))
-            ttk.Label(f, text="Product URL (empty = auto):").grid(row=12, column=0, sticky=tk.W, pady=(8, 2))
+            ttk.Label(f, text="Price (e.g. <6):").grid(row=12, column=0, sticky=tk.W, pady=(8, 2))
+            entries["block_price_value_f"] = ttk.Entry(f, width=10)
+            entries["block_price_value_f"].insert(0, (cfg.get("price_value") or "").strip())
+            entries["block_price_value_f"].grid(row=12, column=1, sticky=tk.W, padx=(4, 0))
+            ttk.Label(f, text="% off (e.g. >50):").grid(row=12, column=2, sticky=tk.W, padx=(8, 4), pady=(8, 2))
+            entries["block_discount_value_f"] = ttk.Entry(f, width=10)
+            entries["block_discount_value_f"].insert(0, (cfg.get("discount_value") or "").strip())
+            entries["block_discount_value_f"].grid(row=12, column=3, sticky=tk.W, padx=(4, 0))
+            ttk.Label(f, text="Product URL (empty = auto):").grid(row=13, column=0, sticky=tk.W, pady=(8, 2))
             entries["override_url_text"] = ttk.Entry(f, width=50)
             entries["override_url_text"].insert(0, (cfg.get("override_url") or "").strip())
-            entries["override_url_text"].grid(row=13, column=0, columnspan=6, sticky=tk.W, pady=(0, 4))
+            entries["override_url_text"].grid(row=14, column=0, columnspan=6, sticky=tk.W, pady=(0, 4))
         elif btype == "text":
             ttk.Label(f, text="Content (HTML allowed):").grid(row=0, column=0, sticky=tk.NW, pady=2)
             entries["content"] = scrolledtext.ScrolledText(f, width=50, height=6, wrap=tk.WORD)
@@ -949,6 +980,8 @@ class Application:
                 new_cfg["publisher"] = (entries.get("block_publisher") and entries["block_publisher"].get().strip()) or ""
                 new_cfg["developer"] = (entries.get("block_developer") and entries["block_developer"].get().strip()) or ""
                 new_cfg["tags"] = (entries.get("block_tags") and entries["block_tags"].get().strip()) or ""
+                new_cfg["price_value"] = (entries.get("block_price_value") and entries["block_price_value"].get().strip()) or ""
+                new_cfg["discount_value"] = (entries.get("block_discount_value") and entries["block_discount_value"].get().strip()) or ""
                 urls_dl = parse_pasted_urls(entries.get("override_urls_text") and entries["override_urls_text"].get("1.0", tk.END) or "")
                 new_cfg["override_urls"] = urls_dl
                 new_cfg["image_source"] = entries["image_source"].get().strip() or "feed"
@@ -964,6 +997,8 @@ class Application:
                 new_cfg["publisher"] = (entries.get("block_publisher_f") and entries["block_publisher_f"].get().strip()) or ""
                 new_cfg["developer"] = (entries.get("block_developer_f") and entries["block_developer_f"].get().strip()) or ""
                 new_cfg["tags"] = (entries.get("block_tags_f") and entries["block_tags_f"].get().strip()) or ""
+                new_cfg["price_value"] = (entries.get("block_price_value_f") and entries["block_price_value_f"].get().strip()) or ""
+                new_cfg["discount_value"] = (entries.get("block_discount_value_f") and entries["block_discount_value_f"].get().strip()) or ""
                 new_cfg["override_url"] = (entries.get("override_url_text") and entries["override_url_text"].get().strip()) or ""
                 new_cfg["image_source"] = entries["image_source"].get().strip() or "feed"
                 new_cfg["capsule_size"] = entries["capsule_size"].get().strip() or "header"
@@ -1121,6 +1156,7 @@ class Application:
             return list(products)
         products = get_on_sale_products(self._index, resolve_steam_by_name=True)
         rows = enrich_with_steam_reviews(products, progress_callback=None)
+        currency = (self.email_currency_var.get() or "USD").strip() or "USD"
         rows = apply_deal_filters(
             rows,
             score_type=self.email_score_type.get(),
@@ -1128,6 +1164,8 @@ class Application:
             label_value=self.email_label_value.get(),
             min_reviews=self.email_min_reviews.get(),
             discount_value=self.email_discount_value.get(),
+            price_value=self.email_price_value.get(),
+            currency=currency,
             sale_end_type=self.email_sale_end_type.get(),
             sale_end_value=self.email_sale_end_value.get(),
         )
@@ -1155,6 +1193,7 @@ class Application:
             "label_value": self.email_label_value.get(),
             "min_reviews": self.email_min_reviews.get(),
             "discount_value": self.email_discount_value.get(),
+            "price_value": self.email_price_value.get(),
             "sale_end_type": self.email_sale_end_type.get(),
             "sale_end_value": self.email_sale_end_value.get(),
             "publisher": self.email_publisher_var.get(),
@@ -1203,7 +1242,7 @@ class Application:
             def get_screenshots(app_id):
                 out = fetch_app_details_full(app_id, use_cache=True)
                 return (out or {}).get("screenshots") or []
-            block_games = _email_block_games(self._email_blocks, pool, self._index)
+            block_games = _email_block_games(self._email_blocks, pool, self._index, currency=currency)
             html = build_email_html(
                 self._email_blocks,
                 pool,
@@ -1284,7 +1323,8 @@ class Application:
                     if len(payload) >= 4 and payload[3] is not None:
                         self._on_sale_rows = payload[3]
                     if self._index is not None:
-                        block_games = _email_block_games(self._email_blocks, pool, self._index)
+                        currency = (self.email_currency_var.get() or "USD").strip() or "USD"
+                        block_games = _email_block_games(self._email_blocks, pool, self._index, currency=currency)
                         for i, block in enumerate(self._email_blocks):
                             btype = (block.get("type") or "").strip().lower()
                             if btype not in ("deal_list", "featured"):
