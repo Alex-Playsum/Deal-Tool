@@ -158,6 +158,21 @@ def _save_resolution_cache(cache: dict[str, int]) -> None:
 # Avoids false matches like "io" in "evolution" or "access" in "early access".
 _RESOLVE_SUBSTRING_MAJORITY = 0.5
 
+# Normalized suffixes (with leading space) for base-game fallback. Strip from end of norm_title
+# so e.g. "ARC Raiders - Deluxe Edition" -> "arc raiders" and resolve to base game's app_id.
+_EDITION_SUFFIXES = (
+    " deluxe edition",
+    " standard edition",
+    " ultimate edition",
+    " enhanced edition",
+    " complete edition",
+    " gold edition",
+    " definitive edition",
+    " collector's edition",
+    " collectors edition",
+)
+_MIN_BASE_TITLE_LEN = 2
+
 
 def _normalize_title(title: str) -> str:
     """Normalize for matching: lowercase, collapse spaces, remove some punctuation."""
@@ -173,8 +188,9 @@ def _normalize_title(title: str) -> str:
 def resolve_name_to_app_id(title: str, app_list: list[dict] | None = None) -> int | None:
     """
     Resolve product title to a Steam app_id using the app list.
-    Tries exact match (normalized), then case-insensitive, then substring (title in name or name in title).
-    Returns first match when multiple; prefer exact over substring.
+    Tries exact match (normalized), then case-insensitive, then substring (title in name or name in title,
+    with majority length check). If no match, strips edition suffixes (e.g. " - Deluxe Edition") and
+    retries so bundles without their own app can use the base game's app_id.
     """
     if not title or not title.strip():
         return None
@@ -209,6 +225,22 @@ def resolve_name_to_app_id(title: str, app_list: list[dict] | None = None) -> in
             longer = max(len(n), len(norm_title))
             if longer > 0 and (shorter / longer) >= _RESOLVE_SUBSTRING_MAJORITY:
                 return candidates[0][0]
+    # 4) Base-game fallback: strip edition suffixes and try again (for bundles without their own app)
+    base_titles = set()
+    for suffix in _EDITION_SUFFIXES:
+        if norm_title.endswith(suffix):
+            base = norm_title[: -len(suffix)].strip()
+            if len(base) >= _MIN_BASE_TITLE_LEN:
+                base_titles.add(base)
+    for base in base_titles:
+        if base in by_norm:
+            return by_norm[base][0][0]
+        for n, candidates in by_norm.items():
+            if base in n or n in base:
+                shorter = min(len(n), len(base))
+                longer = max(len(n), len(base))
+                if longer > 0 and (shorter / longer) >= _RESOLVE_SUBSTRING_MAJORITY:
+                    return candidates[0][0]
     return None
 
 
