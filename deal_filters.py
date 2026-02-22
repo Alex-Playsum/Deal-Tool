@@ -4,7 +4,7 @@ import re
 from datetime import datetime, timezone
 
 from config import STEAM_LABEL_MIN_PERCENT
-from on_sale import _discount_pct, _price_for_currency, _sale_end_ms
+from on_sale import _discount_pct_for_currency, _price_for_currency, _sale_end_ms
 
 
 _ONE_DAY_MS = 86400 * 1000
@@ -131,8 +131,8 @@ def apply_reviews_filter(rows: list[dict], min_reviews: str) -> list[dict]:
     return [r for r in rows if (r.get("steam_total_reviews") or 0) >= n]
 
 
-def apply_discount_filter(rows: list[dict], value_str: str) -> list[dict]:
-    """Filter rows by discount %: operator + number (e.g. >50, >=30). Empty = no filter."""
+def apply_discount_filter(rows: list[dict], value_str: str, currency: str = "USD") -> list[dict]:
+    """Filter rows by discount % for the given currency: operator + number (e.g. >50, >=30). Empty = no filter."""
     s = (value_str or "").strip()
     if not s:
         return rows
@@ -142,7 +142,7 @@ def apply_discount_filter(rows: list[dict], value_str: str) -> list[dict]:
     op, num = m.group(1), int(m.group(2))
 
     def ok(row):
-        pct = _discount_pct(row)
+        pct = _discount_pct_for_currency(row, currency)
         if pct is None:
             return False
         if op == ">":
@@ -275,7 +275,7 @@ def apply_deal_filters(
     """
     rows = apply_score_filter(rows, score_type, score_value, label_value)
     rows = apply_reviews_filter(rows, min_reviews)
-    rows = apply_discount_filter(rows, discount_value)
+    rows = apply_discount_filter(rows, discount_value, currency)
     rows = apply_price_filter(rows, price_value, currency)
     rows = apply_sale_end_filter(rows, sale_end_type, sale_end_value)
     return rows

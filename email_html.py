@@ -60,10 +60,9 @@ def _display_price(product: dict, currency: str, coupon_percent: float) -> str:
     return f"{raw:.2f}"
 
 
-def _display_discount_pct(product: dict, coupon_percent: float) -> str:
-    """Effective discount % (after coupon if applied). Uses one variant (USD or first)."""
-    by_curr = product.get("variants_by_currency") or {}
-    v = by_curr.get("USD") or (next(iter(by_curr.values()), None) if by_curr else None)
+def _display_discount_pct(product: dict, coupon_percent: float, currency: str = "USD") -> str:
+    """Effective discount % (after coupon if applied) for the given currency variant."""
+    v = _variant_for_currency(product, currency)
     if not v:
         return "—"
     orig = float(v.get("originalPrice", 0))
@@ -108,7 +107,7 @@ def _render_pricing_html(
 ) -> str:
     """Steam-style: green badge (discount % or price, or both), strikethrough original, discounted price. Uses symbol-only (e.g. $ not US ($))."""
     symbol = _currency_symbol(currency)
-    discount_pct = _display_discount_pct(product, coupon_percent)
+    discount_pct = _display_discount_pct(product, coupon_percent, currency)
     display_price = _display_price(product, currency, coupon_percent)
     original = _original_price(product, currency)
     if show_both:

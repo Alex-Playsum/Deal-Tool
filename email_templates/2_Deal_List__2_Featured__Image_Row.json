@@ -1,0 +1,150 @@
+{
+  "blocks": [
+    {
+      "type": "header",
+      "config": {
+        "title": "",
+        "logo_url": "https://app.playsum.live/playsum-logo-banner.png",
+        "link": "https://store.playsum.live/",
+        "view_in_browser_url": ""
+      }
+    },
+    {
+      "type": "title",
+      "config": {
+        "text": "Lunar New Year Sale!"
+      }
+    },
+    {
+      "type": "featured",
+      "config": {
+        "image_source": "steam_capsule",
+        "capsule_size": "header",
+        "show_titles": true,
+        "description": "",
+        "offer_ends": "",
+        "override_url": "https://store.playsum.live/product/ea1f59fa-e271-4c5d-bd9c-2069ff671a91/nova-lands",
+        "publisher": "",
+        "developer": "",
+        "tags": "",
+        "price_value": "",
+        "discount_value": "",
+        "show_rating": true,
+        "show_reviews": true,
+        "rating_style": "label"
+      }
+    },
+    {
+      "type": "button",
+      "config": {
+        "text": "SEE STORE PAGE",
+        "url": ""
+      }
+    },
+    {
+      "type": "deal_list",
+      "config": {
+        "games_count": 4,
+        "image_source": "steam_capsule",
+        "capsule_size": "capsule_616x353",
+        "show_titles": false,
+        "section_title": "",
+        "override_urls": [
+          "https://store.playsum.live/product/f0825240-d5f6-490f-b7c0-c5891d0381b7/f1-manager-2023",
+          "https://store.playsum.live/product/63944dd3-e2de-4a3f-8809-31b56ec1ff4e/sniper-ghost-warrior-contracts-2-tactical-tracker-weapons-pack",
+          "https://store.playsum.live/product/0efe8bbd-b800-40af-892d-6b75918edafe/worms-rumble-deluxe-edition",
+          "https://store.playsum.live/product/99fbc7e2-07ec-4d0f-8230-cf3df37d2f95/sunday-gold"
+        ],
+        "publisher": "",
+        "developer": "",
+        "tags": "",
+        "price_value": "",
+        "discount_value": "",
+        "show_rating": false,
+        "show_reviews": false,
+        "rating_style": "percent"
+      }
+    },
+    {
+      "type": "deal_list",
+      "config": {
+        "games_count": 4,
+        "image_source": "steam_capsule",
+        "capsule_size": "capsule_616x353",
+        "show_titles": false,
+        "section_title": "",
+        "override_urls": [
+          "https://store.playsum.live/product/e2886dfe-58be-5b70-a2b0-4391ab5473c4/pathfinder-wrath-of-the-righteous-enhanced-edition",
+          "https://store.playsum.live/product/d5bec98b-72b7-4daa-9ba2-c70d828052a7/scrapnaut",
+          "https://store.playsum.live/product/0efa0d9a-38d5-4ba2-92fc-adae06a1d6a3/turbo-kid",
+          "https://store.playsum.live/product/b20d858e-d948-444a-b574-6780cb212fa6/sniper-ghost-warrior-contracts-savage-sniper-weapon-pack"
+        ],
+        "publisher": "",
+        "developer": "",
+        "tags": "",
+        "price_value": "",
+        "discount_value": "",
+        "show_rating": false,
+        "show_reviews": false,
+        "rating_style": "percent"
+      }
+    },
+    {
+      "type": "button",
+      "config": {
+        "text": "View more",
+        "url": ""
+      }
+    },
+    {
+      "type": "featured",
+      "config": {
+        "image_source": "steam_capsule",
+        "capsule_size": "header",
+        "show_titles": true,
+        "description": "",
+        "offer_ends": "",
+        "override_url": "https://store.playsum.live/product/46e6fb04-81af-4ab2-a040-4951ffef5d99/no-man-s-sky",
+        "publisher": "",
+        "developer": "",
+        "tags": "",
+        "price_value": "",
+        "discount_value": "",
+        "show_rating": true,
+        "show_reviews": true,
+        "rating_style": "label"
+      }
+    },
+    {
+      "type": "button",
+      "config": {
+        "text": "SEE STORE PAGE",
+        "url": ""
+      }
+    },
+    {
+      "type": "image_row",
+      "config": {
+        "section_title": "",
+        "image_1": "https://d15k2d11r6t6rl.cloudfront.net/public/users/Integrators/669d5713-9b6a-46bb-bd7e-c542cff6dd6a/54a8c033ba4d41199a62b10553f0761a/Bottom-Buttons-1.png",
+        "link_1": "https://store.playsum.live/",
+        "alt_1": "",
+        "image_2": "https://d15k2d11r6t6rl.cloudfront.net/public/users/Integrators/669d5713-9b6a-46bb-bd7e-c542cff6dd6a/54a8c033ba4d41199a62b10553f0761a/Bottom-Buttons-2.png",
+        "link_2": "https://store.playsum.live/",
+        "alt_2": "",
+        "image_3": "https://d15k2d11r6t6rl.cloudfront.net/public/users/Integrators/669d5713-9b6a-46bb-bd7e-c542cff6dd6a/54a8c033ba4d41199a62b10553f0761a/Bottom-Buttons-3.png",
+        "link_3": "https://store.playsum.live/",
+        "alt_3": ""
+      }
+    },
+    {
+      "type": "footer",
+      "config": {}
+    }
+  ],
+  "display": {
+    "currency": "USD",
+    "show": "both",
+    "coupon_percent": 0
+  }
+}

@@ -22,13 +22,9 @@ def _percent_off_with_code(variant: dict) -> int:
 
 
 def _variant_for_percent(product: dict) -> dict | None:
-    """Pick one variant to compute % off (prefer USD, else first)."""
+    """Pick one variant to compute % off (always USD for Deal Table)."""
     by_curr = product.get("variants_by_currency") or {}
-    if by_curr.get("USD"):
-        return by_curr["USD"]
-    for v in by_curr.values():
-        return v
-    return None
+    return by_curr.get("USD")
 
 
 def build_reddit_table(

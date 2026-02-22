@@ -38,6 +38,10 @@ from on_sale import (
     enrich_with_steam_reviews,
     _discount_str,
     _discount_pct,
+    _discount_pct_after_coupon,
+    _discount_pct_for_currency,
+    _discount_str_for_currency,
+    _price_after_coupon,
     _sale_end_ms,
     _sale_end_str,
     _release_date_str,
@@ -372,7 +376,7 @@ def _email_block_games(blocks: list[dict], pool: list[dict], index: dict | None 
                     filtered = _apply_developer_filter(filtered, (cfg.get("developer") or "").strip())
                     filtered = _apply_tags_filter(filtered, (cfg.get("tags") or "").strip())
                     filtered = apply_price_filter(filtered, (cfg.get("price_value") or "").strip(), currency)
-                    filtered = apply_discount_filter(filtered, (cfg.get("discount_value") or "").strip())
+                    filtered = apply_discount_filter(filtered, (cfg.get("discount_value") or "").strip(), currency)
                     filtered = [g for g in filtered if _game_used_key(g) not in used]
                     n = max(0, int((cfg.get("games_count") or 4)))
                     result[i] = _weighted_sample(filtered, n, _game_pick_score)
@@ -399,7 +403,7 @@ def _email_block_games(blocks: list[dict], pool: list[dict], index: dict | None 
                     filtered = _apply_developer_filter(filtered, (cfg.get("developer") or "").strip())
                     filtered = _apply_tags_filter(filtered, (cfg.get("tags") or "").strip())
                     filtered = apply_price_filter(filtered, (cfg.get("price_value") or "").strip(), currency)
-                    filtered = apply_discount_filter(filtered, (cfg.get("discount_value") or "").strip())
+                    filtered = apply_discount_filter(filtered, (cfg.get("discount_value") or "").strip(), currency)
                     filtered = [g for g in filtered if _game_used_key(g) not in used]
                     result[i] = _weighted_sample(filtered, 1, _game_pick_score)
             for g in result[i] or []:
@@ -508,7 +512,15 @@ class Application:
         self.discount_filter_var = tk.StringVar(value="")
         ttk.Entry(filt_frame, textvariable=self.discount_filter_var, width=10).grid(row=0, column=8, sticky=tk.W, padx=(0, 4))
         ttk.Label(filt_frame, text="(e.g. >50)").grid(row=0, column=9, sticky=tk.W, padx=(0, 8))
-        ttk.Button(filt_frame, text="Apply filters", command=self._apply_filters_tab2).grid(row=0, column=10, padx=(8, 0))
+        ttk.Label(filt_frame, text="Currency:").grid(row=0, column=10, sticky=tk.W, padx=(16, 4))
+        self.tab2_currency_var = tk.StringVar(value="USD")
+        tab2_curr_combo = ttk.Combobox(filt_frame, textvariable=self.tab2_currency_var, width=8, state="readonly")
+        tab2_curr_combo["values"] = tuple(ALL_CURRENCIES)
+        tab2_curr_combo.grid(row=0, column=11, sticky=tk.W, padx=(0, 8))
+        ttk.Label(filt_frame, text="Coupon %:").grid(row=0, column=12, sticky=tk.W, padx=(16, 4))
+        self.tab2_coupon_var = tk.StringVar(value="0")
+        ttk.Spinbox(filt_frame, from_=0, to=50, width=5, textvariable=self.tab2_coupon_var).grid(row=0, column=13, sticky=tk.W, padx=(0, 8))
+        ttk.Button(filt_frame, text="Apply filters", command=self._apply_filters_tab2).grid(row=0, column=14, padx=(8, 0))
 
         # Sale end filter (row 1)
         ttk.Label(filt_frame, text="Sale end:").grid(row=1, column=0, sticky=tk.W, padx=(0, 4), pady=(8, 0))
@@ -548,11 +560,11 @@ class Application:
         self.tab2_sheet_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
         self.tab2_sheet_frame.grid_columnconfigure(0, weight=1)
         self.tab2_sheet_frame.grid_rowconfigure(0, weight=1)
-        # Column width ratios (Game, Rating, Reviews, % Off, Release date, Sale end, Developer, Publisher, Tags) - sum 1.0
-        self._tab2_column_ratios = [0.22, 0.14, 0.08, 0.06, 0.10, 0.10, 0.12, 0.12, 0.08]
+        # Column width ratios (Game, Rating, Reviews, % Off, Price, Release date, Sale end, Developer, Publisher, Tags) - sum 1.0
+        self._tab2_column_ratios = [0.20, 0.12, 0.07, 0.06, 0.06, 0.09, 0.09, 0.11, 0.11, 0.09]
         self.tab2_sheet = Sheet(
             self.tab2_sheet_frame,
-            headers=["Game", "Rating", "Reviews", "% Off", "Release date", "Sale end", "Developer", "Publisher", "Tags"],
+            headers=["Game", "Rating", "Reviews", "% Off", "Price", "Release date", "Sale end", "Developer", "Publisher", "Tags"],
             show_row_index=False,
             show_x_scrollbar=True,
             show_y_scrollbar=True,
@@ -562,7 +574,7 @@ class Application:
             alternate_color="#F0F4F8",
         )
         # Center text in all columns except Game (column 0)
-        self.tab2_sheet.align_columns([1, 2, 3, 4, 5, 6, 7, 8], align="center")
+        self.tab2_sheet.align_columns([1, 2, 3, 4, 5, 6, 7, 8, 9], align="center")
         self.tab2_sheet.enable_bindings()
         self.tab2_sheet.bind("<Double-1>", self._on_tab2_sheet_double_click)
         self.tab2_sheet.grid(row=0, column=0, sticky="nswe")
@@ -1487,6 +1499,7 @@ class Application:
         search_query = self.tab2_search_var.get()
         release_date_type = self.release_date_filter_type.get()
         release_date_val = self.release_date_filter_value.get()
+        currency = (self.tab2_currency_var.get() or "USD").strip() or "USD"
         rows = apply_deal_filters(
             self._on_sale_rows,
             score_type=score_type,
@@ -1494,6 +1507,7 @@ class Application:
             label_value=label_val,
             min_reviews=min_rev,
             discount_value=discount_val,
+            currency=currency,
             sale_end_type=sale_end_type,
             sale_end_value=sale_end_val,
         )
@@ -1534,6 +1548,11 @@ class Application:
 
     def _populate_tab2_sheet(self, rows: list[dict]):
         self._tab2_displayed_rows = rows
+        currency = (self.tab2_currency_var.get() or "USD").strip() or "USD"
+        try:
+            coupon = max(0, min(50, float((self.tab2_coupon_var.get() or "0").strip() or 0)))
+        except (ValueError, TypeError):
+            coupon = 0.0
         data = []
         for r in rows:
             title = (r.get("title") or "").strip() or "—"
@@ -1549,7 +1568,10 @@ class Application:
                 rating = "N/A"
             reviews = r.get("steam_total_reviews")
             reviews_str = str(reviews) if reviews is not None and reviews > 0 else "N/A"
-            discount_str = _discount_str(r)
+            dp = _discount_pct_after_coupon(r, currency, coupon)
+            discount_str = f"{dp}%" if dp is not None else ""
+            price_val = _price_after_coupon(r, currency, coupon)
+            price_str = f"{price_val:.2f}" if price_val is not None else "—"
             release_str = _release_date_str(r)
             sale_end_str = _sale_end_str(r)
             developer_str = (r.get("steam_developer") or "").strip() or "—"
@@ -1559,41 +1581,50 @@ class Application:
                 tags_str = ", ".join(str(t).strip() for t in tags_raw if t and str(t).strip()) or "—"
             else:
                 tags_str = (tags_raw or "").strip() or "—"
-            data.append([title, rating, reviews_str, discount_str, release_str, sale_end_str, developer_str, publisher_str, tags_str])
+            data.append([title, rating, reviews_str, discount_str, price_str, release_str, sale_end_str, developer_str, publisher_str, tags_str])
         self.tab2_sheet.set_sheet_data(data)
         self._apply_tab2_color_scale(rows)
         self._resize_tab2_columns()
         self.tab2_sheet.refresh()
 
     def _apply_tab2_color_scale(self, rows: list[dict]):
-        """Apply green->yellow->orange->red background for Rating (1), Reviews (2), % Off (3)."""
+        """Apply green->yellow->orange->red for Rating (1), Reviews (2), % Off (3), Price (4). Lower price = greener."""
         if not rows:
             return
+        currency = (self.tab2_currency_var.get() or "USD").strip() or "USD"
+        try:
+            coupon = max(0, min(50, float((self.tab2_coupon_var.get() or "0").strip() or 0)))
+        except (ValueError, TypeError):
+            coupon = 0.0
         n = len(rows)
-        # Collect numeric values: col 1 = rating 0-100, col 2 = log10(reviews), col 3 = discount 0-100
         rating_vals = []
         review_vals = []
         discount_vals = []
+        price_vals = []
         for r in rows:
             pct = r.get("steam_percent_positive")
             rating_vals.append(float(pct) if pct is not None else None)
             rev = r.get("steam_total_reviews")
             review_vals.append(math.log10(max(1, rev)) if rev and rev > 0 else None)
-            discount_vals.append(float(_discount_pct(r)) if _discount_pct(r) is not None else None)
-        for col_idx, vals in enumerate([rating_vals, review_vals, discount_vals]):
+            dp = _discount_pct_after_coupon(r, currency, coupon)
+            discount_vals.append(float(dp) if dp is not None else None)
+            pr = _price_after_coupon(r, currency, coupon)
+            price_vals.append(pr if pr is not None else None)
+        for col_idx, vals in enumerate([rating_vals, review_vals, discount_vals, price_vals]):
             numeric = [v for v in vals if v is not None]
             if not numeric:
                 continue
             lo, hi = min(numeric), max(numeric)
             span = hi - lo if hi > lo else 1.0
             sheet_col = col_idx + 1
-            for r in range(n):
-                v = vals[r]
+            for row_idx in range(n):
+                v = vals[row_idx]
                 if v is None:
                     continue
-                t = (v - lo) / span
+                # Price (col 4): invert so lower price = red, higher price = green
+                t = (hi - v) / span if col_idx == 3 else (v - lo) / span
                 color = self._value_to_color(t)
-                self.tab2_sheet[(r, sheet_col)].bg = color
+                self.tab2_sheet[(row_idx, sheet_col)].bg = color
 
     def _on_tab2_sheet_double_click(self, event=None):
         """Open the selected row's product page in the default browser."""
@@ -1635,11 +1666,16 @@ class Application:
         wb = Workbook()
         ws = wb.active
         ws.title = "Deal Finder"
-        headers = ["Game", "Rating", "Reviews", "% Off", "Release date", "Sale end", "Developer", "Publisher", "Tags"]
+        headers = ["Game", "Rating", "Reviews", "% Off", "Price", "Release date", "Sale end", "Developer", "Publisher", "Tags"]
         for col, h in enumerate(headers, start=1):
             ws.cell(row=1, column=col, value=h)
 
-        rating_vals, review_vals, discount_vals = [], [], []
+        currency = (self.tab2_currency_var.get() or "USD").strip() or "USD"
+        try:
+            coupon = max(0, min(50, float((self.tab2_coupon_var.get() or "0").strip() or 0)))
+        except (ValueError, TypeError):
+            coupon = 0.0
+        rating_vals, review_vals, discount_vals, price_vals = [], [], [], []
         data_rows = []
         for r in rows:
             title = (r.get("title") or "").strip() or "—"
@@ -1655,7 +1691,10 @@ class Application:
                 rating = "N/A"
             reviews = r.get("steam_total_reviews")
             reviews_str = str(reviews) if reviews is not None and reviews > 0 else "N/A"
-            discount_str = _discount_str(r)
+            dp = _discount_pct_after_coupon(r, currency, coupon)
+            discount_str = f"{dp}%" if dp is not None else ""
+            price_val = _price_after_coupon(r, currency, coupon)
+            price_str = f"{price_val:.2f}" if price_val is not None else "—"
             release_str = _release_date_str(r)
             sale_end_str = _sale_end_str(r)
             developer_str = (r.get("steam_developer") or "").strip() or "—"
@@ -1665,11 +1704,12 @@ class Application:
                 tags_str = ", ".join(str(t).strip() for t in tags_raw if t and str(t).strip()) or "—"
             else:
                 tags_str = (tags_raw or "").strip() or "—"
-            data_rows.append([title, rating, reviews_str, discount_str, release_str, sale_end_str, developer_str, publisher_str, tags_str])
+            data_rows.append([title, rating, reviews_str, discount_str, price_str, release_str, sale_end_str, developer_str, publisher_str, tags_str])
             rating_vals.append(float(pct) if pct is not None else None)
             rev = r.get("steam_total_reviews")
             review_vals.append(math.log10(max(1, rev)) if rev and rev > 0 else None)
-            discount_vals.append(float(_discount_pct(r)) if _discount_pct(r) is not None else None)
+            discount_vals.append(float(dp) if dp is not None else None)
+            price_vals.append(price_val if price_val is not None else None)
 
         for i, row_data in enumerate(data_rows):
             excel_row = i + 2
@@ -1679,20 +1719,21 @@ class Application:
                 cell.fill = PatternFill(start_color=row_fill, end_color=row_fill, fill_type="solid")
 
         n = len(rows)
-        for col_idx, vals in enumerate([rating_vals, review_vals, discount_vals]):
+        for col_idx, vals in enumerate([rating_vals, review_vals, discount_vals, price_vals]):
             numeric = [v for v in vals if v is not None]
             if not numeric:
                 continue
             lo, hi = min(numeric), max(numeric)
             span = hi - lo if hi > lo else 1.0
             excel_col = col_idx + 2
-            for r in range(n):
-                v = vals[r]
+            for row_idx in range(n):
+                v = vals[row_idx]
                 if v is None:
                     continue
-                t = (v - lo) / span
+                # Price (col 4): invert so lower price = red, higher price = green
+                t = (hi - v) / span if col_idx == 3 else (v - lo) / span
                 color = self._value_to_color(t).lstrip("#")
-                ws.cell(row=r + 2, column=excel_col).fill = PatternFill(
+                ws.cell(row=row_idx + 2, column=excel_col).fill = PatternFill(
                     start_color=color, end_color=color, fill_type="solid"
                 )
 

@@ -42,6 +42,27 @@ def _discount_str(product: dict) -> str:
     return f"{best}%" if best is not None else ""
 
 
+def _discount_pct_for_currency(product: dict, currency: str) -> int | None:
+    """Discount percentage for the given currency variant only, or None."""
+    variants = product.get("variants_by_currency") or {}
+    v = variants.get(currency) if currency else None
+    if not v:
+        return None
+    pct = (v.get("discountPercentage") or "").strip()
+    if not pct:
+        return None
+    try:
+        return int(pct)
+    except ValueError:
+        return None
+
+
+def _discount_str_for_currency(product: dict, currency: str) -> str:
+    """Discount percentage string for the given currency variant, or empty."""
+    best = _discount_pct_for_currency(product, currency)
+    return f"{best}%" if best is not None else ""
+
+
 def _price_for_currency(product: dict, currency: str) -> float | None:
     """Current price for a currency: discountPrice if present else originalPrice. Returns None if no variant."""
     variants = product.get("variants_by_currency") or {}
@@ -63,6 +84,38 @@ def _price_for_currency(product: dict, currency: str) -> float | None:
         except (TypeError, ValueError):
             pass
     return None
+
+
+def _price_after_coupon(product: dict, currency: str, coupon_percent: float) -> float | None:
+    """Price in currency after optional coupon (0 = no coupon). Returns None if no variant."""
+    p = _price_for_currency(product, currency)
+    if p is None:
+        return None
+    if coupon_percent and coupon_percent > 0:
+        p = p * (1 - coupon_percent / 100)
+    return p
+
+
+def _discount_pct_after_coupon(product: dict, currency: str, coupon_percent: float) -> int | None:
+    """Discount % for currency after optional coupon. Uses originalPrice and discountPrice from variant."""
+    variants = product.get("variants_by_currency") or {}
+    v = variants.get(currency) if currency else None
+    if not v:
+        return None
+    try:
+        orig = float(v.get("originalPrice", 0))
+    except (TypeError, ValueError):
+        return None
+    if orig <= 0:
+        return None
+    base = v.get("discountPrice")
+    if base is not None:
+        base = float(base)
+    else:
+        base = orig
+    if coupon_percent and coupon_percent > 0:
+        base = base * (1 - coupon_percent / 100)
+    return round((1 - base / orig) * 100)
 
 
 def _sale_end_ms(product: dict) -> int | None:
