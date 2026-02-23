@@ -1002,22 +1002,58 @@ class Application:
             entries["caption"].insert(0, cfg.get("caption") or "")
             entries["caption"].grid(row=1, column=1, sticky=tk.W, pady=2, padx=(4, 0))
         elif btype == "footer":
-            ttk.Label(f, text="Unsubscribe URL:").grid(row=0, column=0, sticky=tk.W, pady=2)
+            row = 0
+            ttk.Label(f, text="Social (icon links; leave empty to hide):").grid(row=row, column=0, sticky=tk.W, pady=(0, 4))
+            row += 1
+            ttk.Label(f, text="Bluesky URL:").grid(row=row, column=0, sticky=tk.W, pady=2)
+            entries["bluesky_url"] = ttk.Entry(f, width=50)
+            entries["bluesky_url"].insert(0, (cfg.get("bluesky_url") or "").strip())
+            entries["bluesky_url"].grid(row=row, column=1, sticky=tk.W, pady=2, padx=(4, 0))
+            row += 1
+            ttk.Label(f, text="TikTok URL:").grid(row=row, column=0, sticky=tk.W, pady=2)
+            entries["tiktok_url"] = ttk.Entry(f, width=50)
+            entries["tiktok_url"].insert(0, (cfg.get("tiktok_url") or "").strip())
+            entries["tiktok_url"].grid(row=row, column=1, sticky=tk.W, pady=2, padx=(4, 0))
+            row += 1
+            ttk.Label(f, text="Instagram URL:").grid(row=row, column=0, sticky=tk.W, pady=2)
+            entries["instagram_url"] = ttk.Entry(f, width=50)
+            entries["instagram_url"].insert(0, (cfg.get("instagram_url") or "").strip())
+            entries["instagram_url"].grid(row=row, column=1, sticky=tk.W, pady=2, padx=(4, 0))
+            row += 1
+            ttk.Label(f, text="YouTube URL:").grid(row=row, column=0, sticky=tk.W, pady=2)
+            entries["youtube_url"] = ttk.Entry(f, width=50)
+            entries["youtube_url"].insert(0, (cfg.get("youtube_url") or "").strip())
+            entries["youtube_url"].grid(row=row, column=1, sticky=tk.W, pady=2, padx=(4, 0))
+            row += 1
+            ttk.Label(f, text="Help center URL:").grid(row=row, column=0, sticky=tk.W, pady=(8, 2))
+            entries["help_center_url"] = ttk.Entry(f, width=50)
+            entries["help_center_url"].insert(0, (cfg.get("help_center_url") or "").strip())
+            entries["help_center_url"].grid(row=row, column=1, sticky=tk.W, pady=(8, 2), padx=(4, 0))
+            row += 1
+            ttk.Label(f, text="Community URL:").grid(row=row, column=0, sticky=tk.W, pady=2)
+            entries["community_url"] = ttk.Entry(f, width=50)
+            entries["community_url"].insert(0, (cfg.get("community_url") or "").strip())
+            entries["community_url"].grid(row=row, column=1, sticky=tk.W, pady=2, padx=(4, 0))
+            row += 1
+            ttk.Label(f, text="Unsubscribe URL:").grid(row=row, column=0, sticky=tk.W, pady=2)
             entries["unsubscribe_url"] = ttk.Entry(f, width=50)
-            entries["unsubscribe_url"].insert(0, cfg.get("unsubscribe_url") or "")
-            entries["unsubscribe_url"].grid(row=0, column=1, sticky=tk.W, pady=2, padx=(4, 0))
-            ttk.Label(f, text="Privacy URL:").grid(row=1, column=0, sticky=tk.W, pady=2)
+            entries["unsubscribe_url"].insert(0, (cfg.get("unsubscribe_url") or "").strip())
+            entries["unsubscribe_url"].grid(row=row, column=1, sticky=tk.W, pady=2, padx=(4, 0))
+            row += 1
+            ttk.Label(f, text="Privacy URL:").grid(row=row, column=0, sticky=tk.W, pady=2)
             entries["privacy_url"] = ttk.Entry(f, width=50)
-            entries["privacy_url"].insert(0, cfg.get("privacy_url") or "")
-            entries["privacy_url"].grid(row=1, column=1, sticky=tk.W, pady=2, padx=(4, 0))
-            ttk.Label(f, text="Terms URL:").grid(row=2, column=0, sticky=tk.W, pady=2)
+            entries["privacy_url"].insert(0, (cfg.get("privacy_url") or "").strip())
+            entries["privacy_url"].grid(row=row, column=1, sticky=tk.W, pady=2, padx=(4, 0))
+            row += 1
+            ttk.Label(f, text="Terms URL:").grid(row=row, column=0, sticky=tk.W, pady=2)
             entries["terms_url"] = ttk.Entry(f, width=50)
-            entries["terms_url"].insert(0, cfg.get("terms_url") or "")
-            entries["terms_url"].grid(row=2, column=1, sticky=tk.W, pady=2, padx=(4, 0))
-            ttk.Label(f, text="Address:").grid(row=3, column=0, sticky=tk.W, pady=2)
+            entries["terms_url"].insert(0, (cfg.get("terms_url") or "").strip())
+            entries["terms_url"].grid(row=row, column=1, sticky=tk.W, pady=2, padx=(4, 0))
+            row += 1
+            ttk.Label(f, text="Address:").grid(row=row, column=0, sticky=tk.W, pady=2)
             entries["address"] = ttk.Entry(f, width=50)
-            entries["address"].insert(0, cfg.get("address") or "")
-            entries["address"].grid(row=3, column=1, sticky=tk.W, pady=2, padx=(4, 0))
+            entries["address"].insert(0, (cfg.get("address") or "").strip())
+            entries["address"].grid(row=row, column=1, sticky=tk.W, pady=2, padx=(4, 0))
 
         def save():
             new_cfg = dict(cfg)
@@ -1094,10 +1130,16 @@ class Application:
                     new_cfg["product"] = self._email_game_pool[new_cfg["game_index"]]
                 new_cfg["caption"] = entries["caption"].get().strip()
             elif btype == "footer":
-                new_cfg["unsubscribe_url"] = entries["unsubscribe_url"].get().strip()
-                new_cfg["privacy_url"] = entries["privacy_url"].get().strip()
-                new_cfg["terms_url"] = entries["terms_url"].get().strip()
-                new_cfg["address"] = entries["address"].get().strip()
+                new_cfg["bluesky_url"] = (entries.get("bluesky_url") and entries["bluesky_url"].get().strip()) or ""
+                new_cfg["tiktok_url"] = (entries.get("tiktok_url") and entries["tiktok_url"].get().strip()) or ""
+                new_cfg["instagram_url"] = (entries.get("instagram_url") and entries["instagram_url"].get().strip()) or ""
+                new_cfg["youtube_url"] = (entries.get("youtube_url") and entries["youtube_url"].get().strip()) or ""
+                new_cfg["help_center_url"] = (entries.get("help_center_url") and entries["help_center_url"].get().strip()) or ""
+                new_cfg["community_url"] = (entries.get("community_url") and entries["community_url"].get().strip()) or ""
+                new_cfg["unsubscribe_url"] = (entries.get("unsubscribe_url") and entries["unsubscribe_url"].get().strip()) or ""
+                new_cfg["privacy_url"] = (entries.get("privacy_url") and entries["privacy_url"].get().strip()) or ""
+                new_cfg["terms_url"] = (entries.get("terms_url") and entries["terms_url"].get().strip()) or ""
+                new_cfg["address"] = (entries.get("address") and entries["address"].get().strip()) or ""
             block["config"] = new_cfg
             self._email_refresh_listbox()
             win.destroy()

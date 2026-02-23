@@ -440,25 +440,80 @@ def _render_game_screenshots(
 </table>'''
 
 
+# Playsum-hosted social icons (same as Playsum transactional emails)
+PLAYSUM_ICONS_BASE = "https://app.playsum.live/icons/"
+FOOTER_SOCIAL = (
+    ("bluesky_url", "bluesky.png", 27),
+    ("tiktok_url", "tiktok.png", 30),
+    ("instagram_url", "instagram.png", 30),
+    ("youtube_url", "youtube.png", 32),
+)
+
+
 def _render_footer(block: dict) -> str:
     cfg = block.get("config") or {}
     unsubscribe = (cfg.get("unsubscribe_url") or "").strip()
     privacy = (cfg.get("privacy_url") or "").strip()
     terms = (cfg.get("terms_url") or "").strip()
     address = (cfg.get("address") or "").strip()
-    lines = []
+    help_center_url = (cfg.get("help_center_url") or "").strip()
+    community_url = (cfg.get("community_url") or "").strip()
+    link_style = f"color:{LINK_COLOR};text-decoration:underline;"
+    text_style = f"font-family:{FONT_FAMILY};font-size:14px;line-height:20px;color:{TEXT_PRIMARY};"
+    parts = []
+
+    # Social icons row
+    social_cells = []
+    for key, icon_name, width in FOOTER_SOCIAL:
+        url = (cfg.get(key) or "").strip()
+        if url:
+            icon_url = PLAYSUM_ICONS_BASE + icon_name
+            alt = icon_name.replace(".png", "").capitalize()
+            img = f'<img src="{html_module.escape(icon_url)}" alt="{html_module.escape(alt)}" width="{width}" style="display:block;border:0;outline:none;" />'
+            cell = f'<a href="{html_module.escape(url)}" target="_blank">{img}</a>'
+            social_cells.append(f'<td style="padding:0 10px;">{cell}</td>')
+    if social_cells:
+        social_row = f'<tr><td align="center" style="padding-bottom:16px;"><table role="presentation" border="0" cellpadding="0" cellspacing="0" style="margin:0 auto;"><tr>{"".join(social_cells)}</tr></table></td></tr>'
+        parts.append(social_row)
+
+    # Help center paragraph
+    if help_center_url:
+        help_link = f'<a href="{html_module.escape(help_center_url)}" target="_blank" style="{link_style}">help.playsum.live</a>'
+        parts.append(f'<tr><td align="center" style="padding:0 0 12px;{text_style}">If you have any problems or questions, please visit our help center at {help_link}.</td></tr>')
+
+    # Community paragraph
+    if community_url:
+        comm_link = f'<a href="{html_module.escape(community_url)}" target="_blank" style="{link_style}">Join the Playsum community</a>'
+        parts.append(f'<tr><td align="center" style="padding:0 0 12px;{text_style}">Want to find chill friends to play or discuss your games with? {comm_link}.</td></tr>')
+
+    # Unsubscribe paragraph
     if unsubscribe:
-        lines.append(f'<a href="{html_module.escape(unsubscribe)}" style="color:{LINK_COLOR};text-decoration:none;">Unsubscribe</a>')
-    if privacy:
-        lines.append(f'<a href="{html_module.escape(privacy)}" style="color:{LINK_COLOR};text-decoration:none;">Privacy Policy</a>')
-    if terms:
-        lines.append(f'<a href="{html_module.escape(terms)}" style="color:{LINK_COLOR};text-decoration:none;">Terms</a>')
+        unsub_link = f'<a href="{html_module.escape(unsubscribe)}" style="{link_style}">unsubscribe here</a>'
+        parts.append(f'<tr><td align="center" style="padding:0 0 12px;{text_style}">If you do not wish to receive further communication like this, {unsub_link}.</td></tr>')
+
+    # Privacy | Terms line (optional)
+    if privacy or terms:
+        line_parts = []
+        if privacy:
+            line_parts.append(f'<a href="{html_module.escape(privacy)}" style="{link_style}">Privacy Policy</a>')
+        if terms:
+            line_parts.append(f'<a href="{html_module.escape(terms)}" style="{link_style}">Terms</a>')
+        parts.append(f'<tr><td align="center" style="padding:0 0 12px;{text_style}">{" | ".join(line_parts)}</td></tr>')
+
+    # Address
     if address:
-        lines.append(f'<span style="color:{TEXT_SECONDARY};">{html_module.escape(address)}</span>')
-    content = " | ".join(lines) if lines else "Footer"
+        parts.append(f'<tr><td align="center" style="padding:12px 0 0;{text_style}">{html_module.escape(address)}</td></tr>')
+
+    if not parts:
+        return ""
+    rows_html = "\n    ".join(parts)
     return f'''
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="{_block_wrapper_style()}">
-  <tr><td style="padding-top:24px;padding-bottom:{CELL_PADDING}px;padding-left:{CELL_PADDING}px;padding-right:{CELL_PADDING}px;font-size:11px;color:{TEXT_SECONDARY};" align="center">{content}</td></tr>
+  <tr><td style="padding-top:24px;padding-bottom:{CELL_PADDING}px;padding-left:{CELL_PADDING}px;padding-right:{CELL_PADDING}px;" align="center">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+    {rows_html}
+    </table>
+  </td></tr>
 </table>'''
 
 
