@@ -11,7 +11,9 @@
     },
     {
       "type": "title",
-      "config": {}
+      "config": {
+        "text": "Lunar New Year Sale!"
+      }
     },
     {
       "type": "featured",
@@ -20,13 +22,22 @@
         "capsule_size": "header",
         "show_titles": true,
         "description": "",
-        "offer_ends": ""
+        "offer_ends": "",
+        "publisher": "",
+        "developer": "",
+        "tags": "",
+        "price_value": "",
+        "discount_value": "",
+        "override_url": "https://store.playsum.live/product/b3bf13eb-7d13-4099-82da-64e36e844077/hammerting",
+        "show_rating": true,
+        "show_reviews": true,
+        "rating_style": "label"
       }
     },
     {
       "type": "button",
       "config": {
-        "text": "View more",
+        "text": "SEE STORE PAGE",
         "url": ""
       }
     },
@@ -37,7 +48,13 @@
         "image_source": "steam_capsule",
         "capsule_size": "capsule_616x353",
         "show_titles": true,
-        "section_title": ""
+        "section_title": "",
+        "override_urls": [
+          "https://store.playsum.live/product/523aa89e-6565-4e78-bd6a-b8084ff6e530/lost-winds-2-winter-of-the-melodias",
+          "https://store.playsum.live/product/a0d003e4-6a4e-4e82-804d-ac6bb740abbb/lawn-mowing-simulator",
+          "https://store.playsum.live/product/09372486-1643-4b86-a48b-67772ab890aa/blasphemous-2-deluxe-edition",
+          "https://store.playsum.live/product/bd6d021d-f1d6-422e-8dec-d93af6655029/planet-coaster"
+        ]
       }
     },
     {
@@ -47,13 +64,19 @@
         "image_source": "steam_capsule",
         "capsule_size": "capsule_616x353",
         "show_titles": true,
-        "section_title": ""
+        "section_title": "",
+        "override_urls": [
+          "https://store.playsum.live/product/c1e2dacb-7be5-4e10-818c-a0af3ebc3319/enemy-front",
+          "https://store.playsum.live/product/c86b3979-9284-49d1-ab6d-14490ba4c3ab/thymesia",
+          "https://store.playsum.live/product/0d6c78a5-18ab-4269-a1fc-4d2205d984c9/the-incredible-adventures-of-van-helsing-anthology",
+          "https://store.playsum.live/product/4c5ee751-560a-470f-9a5d-278869c7a934/agatha-christie-hercule-poirot-the-first-cases"
+        ]
       }
     },
     {
       "type": "button",
       "config": {
-        "text": "View more",
+        "text": "View more deals",
         "url": ""
       }
     },
@@ -64,12 +87,39 @@
         "capsule_size": "header",
         "show_titles": true,
         "description": "",
-        "offer_ends": ""
+        "offer_ends": "",
+        "publisher": "",
+        "developer": "",
+        "tags": "",
+        "price_value": "",
+        "discount_value": "",
+        "override_url": "https://store.playsum.live/product/2fc0fa99-78ce-4749-ac58-774427dad886/worms-crazy-golf",
+        "show_rating": true,
+        "show_reviews": true,
+        "rating_style": "label"
+      }
+    },
+    {
+      "type": "button",
+      "config": {
+        "text": "SEE STORE PAGE",
+        "url": ""
       }
     },
     {
       "type": "footer",
-      "config": {}
+      "config": {
+        "bluesky_url": "https://bsky.app/profile/playsum.bsky.social",
+        "tiktok_url": "https://www.tiktok.com/@lets_playsum",
+        "instagram_url": "https://www.instagram.com/lets_playsum",
+        "youtube_url": "https://www.youtube.com/@playsum",
+        "help_center_url": "",
+        "community_url": "",
+        "unsubscribe_url": "https://app.playsum.live/account/",
+        "privacy_url": "",
+        "terms_url": "",
+        "address": "Playsum Inc. \u2022 251 Little Falls Drive, Wilmington, DE 19808"
+      }
     }
   ],
   "display": {

@@ -691,13 +691,15 @@ class Application:
         ttk.Label(tab3, text="Preview & export:").pack(anchor=tk.W, pady=(8, 4))
         export_frame = ttk.Frame(tab3)
         export_frame.pack(fill=tk.X)
-        ttk.Button(export_frame, text="Load feed & build preview", command=self._email_build_preview).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(export_frame, text="Build preview", command=self._email_build_preview).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(export_frame, text="Update preview", command=self._email_update_preview).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(export_frame, text="Re-pick", command=self._email_repick_games).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(export_frame, text="Export HTML…", command=self._email_export_html).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(export_frame, text="Open preview in browser", command=self._email_open_preview_browser).pack(side=tk.LEFT)
         self.email_status_var = tk.StringVar(value="")
         ttk.Label(tab3, textvariable=self.email_status_var).pack(anchor=tk.W)
         self._email_last_html = ""
+        self._email_last_block_games = None
 
     def _email_block_label(self, block: dict) -> str:
         btype = (block.get("type") or "").strip()
@@ -1325,7 +1327,7 @@ class Application:
     def _email_update_preview(self):
         """Rebuild email HTML from existing game pool and current blocks/options. No feed or Steam re-fetch."""
         if not self._email_game_pool:
-            messagebox.showwarning("No preview", "Build preview first (Load feed & build preview), then you can use Update preview for quick changes.")
+            messagebox.showwarning("No preview", "Build preview first, then you can use Update preview for quick changes.")
             return
         self.email_status_var.set("Updating…")
         self.root.update()
@@ -1352,7 +1354,16 @@ class Application:
             def get_screenshots(app_id):
                 out = fetch_app_details_full(app_id, use_cache=True)
                 return (out or {}).get("screenshots") or []
-            block_games = _email_block_games(self._email_blocks, pool, self._index, currency=currency)
+            # Use cached block games so Update preview does not change which games are in each block
+            n_blocks = len(self._email_blocks)
+            if self._email_last_block_games is not None and n_blocks > 0:
+                cached = self._email_last_block_games
+                if len(cached) >= n_blocks:
+                    block_games = list(cached[:n_blocks])
+                else:
+                    block_games = list(cached) + [[] for _ in range(n_blocks - len(cached))]
+            else:
+                block_games = _email_block_games(self._email_blocks, pool, self._index, currency=currency)
             html = build_email_html(
                 self._email_blocks,
                 pool,
@@ -1368,9 +1379,86 @@ class Application:
             import traceback
             traceback.print_exc()
 
+    def _email_repick_games(self):
+        """Re-run auto-selection for deal_list/featured blocks (current pool, no feed reload), freeze selection, refresh preview."""
+        if not self._email_game_pool:
+            messagebox.showwarning("No preview", "Build preview first, then you can Re-pick.")
+            return
+        if self._index is None:
+            messagebox.showwarning("No index", "Feed index is required for Re-pick. Load feed and build preview first.")
+            return
+        self.email_status_var.set("Re-picking…")
+        self.root.update()
+        try:
+            pool = self._email_game_pool
+            for p in pool:
+                end_ms = _sale_end_ms(p)
+                end_formatted = _format_offer_ends_est(end_ms)
+                p["sale_end_display"] = ("Offer ends " + end_formatted) if end_formatted else ""
+            currency = (self.email_currency_var.get() or "USD").strip() or "USD"
+            # Clear overrides so _email_block_games runs fresh auto-pick
+            for block in self._email_blocks:
+                btype = (block.get("type") or "").strip().lower()
+                if btype not in ("deal_list", "featured"):
+                    continue
+                cfg = block.get("config") or {}
+                if btype == "deal_list":
+                    if "override_urls" in cfg:
+                        del cfg["override_urls"]
+                else:
+                    if "override_url" in cfg:
+                        cfg["override_url"] = ""
+            block_games = _email_block_games(self._email_blocks, pool, self._index, currency=currency)
+            # Freeze new selection into blocks (same logic as email_build done handler)
+            for i, block in enumerate(self._email_blocks):
+                btype = (block.get("type") or "").strip().lower()
+                if btype not in ("deal_list", "featured"):
+                    continue
+                cfg = block.get("config") or {}
+                if btype == "deal_list":
+                    games = block_games[i] if block_games and i < len(block_games) else []
+                    urls = [(g.get("link") or "").strip() for g in games if (g.get("link") or "").strip()]
+                    if urls:
+                        cfg["override_urls"] = urls
+                else:
+                    games = block_games[i] if block_games and i < len(block_games) else []
+                    if games and (games[0].get("link") or "").strip():
+                        cfg["override_url"] = (games[0].get("link") or "").strip()
+            self._email_last_block_games = block_games
+            try:
+                coupon = max(0, min(50, float(self.email_coupon_var.get().strip() or 0)))
+            except ValueError:
+                coupon = 0
+            show_val = (self.email_show_var.get() or "price").strip().lower() or "price"
+            if show_val not in ("price", "discount", "both"):
+                show_val = "price"
+            options = {
+                "currency": currency,
+                "show_price": show_val in ("price", "both"),
+                "show_both": show_val == "both",
+                "coupon_percent": coupon,
+            }
+            def get_screenshots(app_id):
+                out = fetch_app_details_full(app_id, use_cache=True)
+                return (out or {}).get("screenshots") or []
+            html = build_email_html(
+                self._email_blocks,
+                pool,
+                options,
+                get_screenshots=get_screenshots,
+                block_games=block_games,
+            )
+            self._email_last_html = html
+            self.email_status_var.set("Re-picked games and updated preview.")
+        except Exception as e:
+            self.email_status_var.set("")
+            messagebox.showerror("Error", str(e))
+            import traceback
+            traceback.print_exc()
+
     def _email_export_html(self):
         if not self._email_last_html:
-            messagebox.showwarning("No preview", "Build preview first (Load feed & build preview), then export.")
+            messagebox.showwarning("No preview", "Build preview first, then export.")
             return
         path = filedialog.asksaveasfilename(
             defaultextension=".html",
@@ -1387,7 +1475,7 @@ class Application:
 
     def _email_open_preview_browser(self):
         if not self._email_last_html:
-            messagebox.showwarning("No preview", "Build preview first (Load feed & build preview), then open in browser.")
+            messagebox.showwarning("No preview", "Build preview first, then open in browser.")
             return
         import tempfile
         with tempfile.NamedTemporaryFile(mode="w", suffix=".html", delete=False, encoding="utf-8") as f:
@@ -1451,6 +1539,7 @@ class Application:
                                     games = block_games[i] if block_games and i < len(block_games) else []
                                     if games and (games[0].get("link") or "").strip():
                                         cfg["override_url"] = (games[0].get("link") or "").strip()
+                        self._email_last_block_games = block_games
                 self._worker_busy = False
             elif kind == "error":
                 _, op, e = msg
