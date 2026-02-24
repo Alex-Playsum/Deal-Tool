@@ -413,6 +413,50 @@ def _email_block_games(blocks: list[dict], pool: list[dict], index: dict | None 
     return result
 
 
+def _merge_block_games_with_overrides(
+    blocks: list[dict],
+    pool: list[dict],
+    index: dict | None,
+    cached_block_games: list[list[dict] | None],
+) -> list[list[dict] | None]:
+    """Use cached block_games but replace with resolved games for blocks that have override_urls/override_url set."""
+    n = len(blocks)
+    merged: list[list[dict] | None] = [
+        (cached_block_games[i] if i < len(cached_block_games) else [])
+        for i in range(n)
+    ]
+    if index is None or not pool:
+        return merged
+    link_to_game = {normalize_url(g.get("link") or ""): g for g in pool if (g.get("link") or "").strip()}
+    for i, block in enumerate(blocks):
+        btype = (block.get("type") or "").strip().lower()
+        cfg = block.get("config") or {}
+        if btype == "deal_list":
+            override_urls = cfg.get("override_urls")
+            if override_urls:
+                try:
+                    products, _ = resolve_urls_to_products(index, override_urls)
+                    merged[i] = [
+                        link_to_game[normalize_url(p.get("link") or "")]
+                        for p in products
+                        if normalize_url(p.get("link") or "") in link_to_game
+                    ]
+                except Exception:
+                    pass  # keep cached on resolve error
+        elif btype == "featured":
+            override_url = (cfg.get("override_url") or "").strip()
+            if override_url:
+                try:
+                    products, _ = resolve_urls_to_products(index, [override_url])
+                    if products and normalize_url(products[0].get("link") or "") in link_to_game:
+                        merged[i] = [link_to_game[normalize_url(products[0].get("link") or "")]]
+                    else:
+                        merged[i] = []
+                except Exception:
+                    pass
+    return merged
+
+
 class Application:
     def __init__(self):
         self.root = tk.Tk()
@@ -1364,6 +1408,10 @@ class Application:
                     block_games = list(cached) + [[] for _ in range(n_blocks - len(cached))]
             else:
                 block_games = _email_block_games(self._email_blocks, pool, self._index, currency=currency)
+            # Respect per-block override URLs (user may have edited one or two blocks in settings)
+            block_games = _merge_block_games_with_overrides(
+                self._email_blocks, pool, self._index, block_games
+            )
             html = build_email_html(
                 self._email_blocks,
                 pool,
