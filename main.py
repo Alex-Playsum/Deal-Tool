@@ -60,7 +60,7 @@ from steam_app_list import clear_app_list_cache, clear_name_resolution_cache
 from steam_appdetails_cache import clear as clear_steam_appdetails_cache
 from steamspy_client import clear_steamspy_cache
 from email_html import build_email_html
-from steam_client import fetch_app_details_full
+from steam_client import fetch_app_details_full, fetch_app_reviews
 
 # Directory for saved email templates (one JSON file per template)
 EMAIL_TEMPLATES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "email_templates")
@@ -145,6 +145,8 @@ def _email_build_worker(
                 details = fetch_app_details_full(p["steam_app_id"], use_cache=True)
                 if details and details.get("short_description"):
                     p["short_description"] = (details.get("short_description") or "").strip()
+        _ensure_steam_reviews_for_email(pool)
+        _resolve_game_screenshots_blocks(blocks, pool, index)
         put(("progress", "email", "Building HTML…"))
         currency = (params.get("currency") or "USD").strip() or "USD"
         try:
@@ -168,6 +170,26 @@ def _email_build_worker(
         put(("done", "email_build", (pool, html, status_msg, full_rows_for_cache)))
     except Exception as e:
         put(("error", "email_build", e))
+
+
+def _ensure_steam_reviews_for_email(pool: list[dict]) -> None:
+    """In-place: for each game with steam_app_id but missing review data, fetch from Steam (cache) and set."""
+    for g in pool:
+        if g.get("steam_app_id") is None:
+            continue
+        if (g.get("steam_total_reviews") or 0) > 0 and (g.get("steam_review_desc") or "").strip():
+            continue
+        summary = fetch_app_reviews(g["steam_app_id"], use_cache=True)
+        if not summary:
+            continue
+        total_reviews = summary.get("total_reviews") or 0
+        total_positive = summary.get("total_positive") or 0
+        if total_reviews > 0:
+            g["steam_percent_positive"] = round(100 * total_positive / total_reviews)
+        else:
+            g["steam_percent_positive"] = None
+        g["steam_review_desc"] = (summary.get("review_score_desc") or "").strip() or None
+        g["steam_total_reviews"] = total_reviews
 
 
 def _format_offer_ends_est(ms: int | None) -> str:
@@ -463,6 +485,31 @@ def _merge_block_games_with_overrides(
                 except Exception:
                     pass
     return merged
+
+
+def _resolve_game_screenshots_blocks(blocks: list[dict], pool: list[dict], index: dict | None) -> None:
+    """In-place: for each game_screenshots block with override_url, resolve to game and set config['product']."""
+    if index is None or not pool:
+        return
+    link_to_game = {normalize_url(g.get("link") or ""): g for g in pool if (g.get("link") or "").strip()}
+    for block in blocks:
+        if (block.get("type") or "").strip().lower() != "game_screenshots":
+            continue
+        cfg = block.get("config") or {}
+        override_url = (cfg.get("override_url") or "").strip()
+        if not override_url:
+            continue
+        try:
+            products, _ = resolve_urls_to_products(index, [override_url])
+            if not products:
+                continue
+            norm = normalize_url(products[0].get("link") or "")
+            if norm in link_to_game:
+                cfg["product"] = link_to_game[norm]
+            else:
+                cfg["product"] = products[0]
+        except Exception:
+            pass
 
 
 class Application:
@@ -762,8 +809,12 @@ class Application:
             return "Featured (1 game)"
         if btype == "game_screenshots":
             p = cfg.get("product")
-            title = (p.get("title") or "").strip()[:20] if p else "—"
-            return f"Game screenshots ({title}…)"
+            if p:
+                title = (p.get("title") or "").strip()[:20] or "—"
+                return f"Game screenshots ({title}…)"
+            if (cfg.get("override_url") or "").strip():
+                return "Game screenshots (URL set)"
+            return "Game screenshots (no game)"
         if btype == "title":
             return f"Title: {(cfg.get('text') or '')[:30]}…" if (cfg.get("text") or "").strip() else "Title"
         if btype == "button":
@@ -794,7 +845,7 @@ class Application:
         elif btype == "featured":
             block["config"] = {"image_source": "feed", "capsule_size": "header", "show_titles": True, "show_rating": False, "show_reviews": False, "rating_style": "percent", "publisher": "", "developer": "", "tags": "", "price_value": "", "discount_value": "", "override_url": ""}
         elif btype == "game_screenshots":
-            block["config"] = {}
+            block["config"] = {"override_url": "", "caption": ""}
         elif btype == "image_row":
             block["config"] = {"section_title": "", "image_1": "", "link_1": "", "alt_1": "", "image_2": "", "link_2": "", "alt_2": "", "image_3": "", "link_3": "", "alt_3": ""}
         elif btype == "button":
@@ -1042,15 +1093,15 @@ class Application:
             entries["url"].insert(0, cfg.get("url") or "")
             entries["url"].grid(row=1, column=1, sticky=tk.W, pady=2, padx=(4, 0))
         elif btype == "game_screenshots":
-            ttk.Label(f, text="Game (from pool):").grid(row=0, column=0, sticky=tk.W, pady=2)
-            pool = self._email_game_pool
-            titles = [(p.get("title") or "").strip() or "—" for p in pool]
-            entries["game_index"] = tk.StringVar(value=str(cfg.get("game_index", 0)) if pool else "0")
-            game_combo = ttk.Combobox(f, textvariable=entries["game_index"], width=35, state="readonly")
-            game_combo["values"] = [f"{i}: {t[:40]}" for i, t in enumerate(titles)] if titles else ["0: (no pool)"]
-            game_combo.grid(row=0, column=1, sticky=tk.W, pady=2, padx=(4, 0))
-            if pool and 0 <= (cfg.get("game_index") or 0) < len(pool):
-                game_combo.set(f"{cfg.get('game_index', 0)}: {(pool[cfg.get('game_index', 0)].get('title') or '')[:40]}")
+            ttk.Label(f, text="Product URL (Playsum):").grid(row=0, column=0, sticky=tk.W, pady=2)
+            entries["override_url"] = ttk.Entry(f, width=50)
+            url_prefill = (cfg.get("override_url") or "").strip()
+            if not url_prefill and self._email_game_pool and isinstance(cfg.get("game_index"), int):
+                gi = cfg["game_index"]
+                if 0 <= gi < len(self._email_game_pool):
+                    url_prefill = (self._email_game_pool[gi].get("link") or "").strip()
+            entries["override_url"].insert(0, url_prefill)
+            entries["override_url"].grid(row=0, column=1, sticky=tk.W, pady=2, padx=(4, 0))
             ttk.Label(f, text="Caption:").grid(row=1, column=0, sticky=tk.W, pady=2)
             entries["caption"] = ttk.Entry(f, width=40)
             entries["caption"].insert(0, cfg.get("caption") or "")
@@ -1175,14 +1226,9 @@ class Application:
                 new_cfg["text"] = entries["text"].get().strip() or "View more"
                 new_cfg["url"] = entries["url"].get().strip()
             elif btype == "game_screenshots":
-                try:
-                    idx_str = entries["game_index"].get().strip().split(":")[0]
-                    new_cfg["game_index"] = int(idx_str)
-                except (ValueError, IndexError):
-                    new_cfg["game_index"] = 0
-                if self._email_game_pool and 0 <= new_cfg["game_index"] < len(self._email_game_pool):
-                    new_cfg["product"] = self._email_game_pool[new_cfg["game_index"]]
-                new_cfg["caption"] = entries["caption"].get().strip()
+                urls = parse_pasted_urls(entries.get("override_url") and entries["override_url"].get() or "")
+                new_cfg["override_url"] = (urls[0] if urls else "").strip()
+                new_cfg["caption"] = (entries.get("caption") and entries["caption"].get() or "").strip()
             elif btype == "footer":
                 new_cfg["bluesky_url"] = (entries.get("bluesky_url") and entries["bluesky_url"].get().strip()) or ""
                 new_cfg["tiktok_url"] = (entries.get("tiktok_url") and entries["tiktok_url"].get().strip()) or ""
@@ -1220,12 +1266,13 @@ class Application:
         if not safe:
             safe = "template"
         os.makedirs(EMAIL_TEMPLATES_DIR, exist_ok=True)
-        # Build blocks for storage: strip runtime-only 'product' from game_screenshots
+        # Build blocks for storage: strip runtime-only 'product' and deprecated 'game_index' from game_screenshots
         blocks = []
         for b in self._email_blocks:
             blk = {"type": b.get("type") or "", "config": dict(b.get("config") or {})}
-            if blk["type"] == "game_screenshots" and "product" in blk["config"]:
-                del blk["config"]["product"]
+            if blk["type"] == "game_screenshots":
+                blk["config"].pop("product", None)
+                blk["config"].pop("game_index", None)
             blocks.append(blk)
         show_val = (self.email_show_var.get() or "price").strip().lower() or "price"
         if show_val not in ("price", "discount", "both"):
@@ -1420,6 +1467,8 @@ class Application:
             block_games = _merge_block_games_with_overrides(
                 self._email_blocks, pool, self._index, block_games
             )
+            _ensure_steam_reviews_for_email(pool)
+            _resolve_game_screenshots_blocks(self._email_blocks, pool, self._index)
             html = build_email_html(
                 self._email_blocks,
                 pool,
@@ -1494,6 +1543,8 @@ class Application:
                 "show_both": show_val == "both",
                 "coupon_percent": coupon,
             }
+            _ensure_steam_reviews_for_email(pool)
+            _resolve_game_screenshots_blocks(self._email_blocks, pool, self._index)
             def get_screenshots(app_id):
                 out = fetch_app_details_full(app_id, use_cache=True)
                 return (out or {}).get("screenshots") or []
