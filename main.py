@@ -22,6 +22,14 @@ from config import (
     STEAM_LABEL_MIN_PERCENT,
     STEAM_LABEL_ORDER,
 )
+
+# Export column order: table columns + partner-only (Partner % Off, Partner Price)
+TAB2_EXPORT_COLUMNS = [
+    "Game", "Rating", "Reviews",
+    "% Off", "Partner % Off",
+    "Price", "Partner Price",
+    "Release date", "Sale end", "Developer", "Publisher", "Tags",
+]
 from deal_filters import (
     apply_deal_filters,
     apply_discount_filter,
@@ -628,7 +636,7 @@ class Application:
         btn_frame = ttk.Frame(tab2)
         btn_frame.pack(anchor=tk.W)
         ttk.Button(btn_frame, text="Copy product URLs to clipboard", command=self._copy_tab2_urls).pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Button(btn_frame, text="Export to Excel…", command=self._export_tab2_to_xlsx).pack(side=tk.LEFT)
+        ttk.Button(btn_frame, text="Export to Excel…", command=self._show_export_tab2_dialog).pack(side=tk.LEFT)
 
         # --- Tab 3: Email Builder ---
         self._email_blocks = []
@@ -1827,35 +1835,70 @@ class Application:
         else:
             messagebox.showwarning("Nothing to copy", "Fetch on-sale list first.")
 
-    def _export_tab2_to_xlsx(self):
+    def _show_export_tab2_dialog(self):
+        rows = getattr(self, "_tab2_displayed_rows", None) or []
+        if not rows:
+            messagebox.showwarning("Nothing to export", "Fetch on-sale list and apply filters first.")
+            return
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Export to Excel")
+        dlg.transient(self.root)
+        dlg.grab_set()
+        main_f = ttk.Frame(dlg, padding=12)
+        main_f.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(main_f, text="Columns to include:").grid(row=0, column=0, columnspan=3, sticky=tk.W, pady=(0, 6))
+        col_vars = []
+        for i, col_name in enumerate(TAB2_EXPORT_COLUMNS):
+            var = tk.BooleanVar(value=True)
+            col_vars.append(var)
+            ttk.Checkbutton(main_f, text=col_name, variable=var).grid(
+                row=1 + i // 3, column=i % 3, sticky=tk.W, padx=(0, 16), pady=2
+            )
+        ttk.Label(main_f, text="Partner discount % (for Partner % Off / Partner Price only):").grid(
+            row=1 + (len(TAB2_EXPORT_COLUMNS) + 2) // 3, column=0, columnspan=2, sticky=tk.W, pady=(12, 4)
+        )
+        partner_var = tk.StringVar(value="10")
+        partner_spin = ttk.Spinbox(main_f, from_=0, to=50, width=6, textvariable=partner_var)
+        partner_spin.grid(row=2 + (len(TAB2_EXPORT_COLUMNS) + 2) // 3, column=0, sticky=tk.W, pady=(0, 12))
+
+        def do_export():
+            selected = [name for name, v in zip(TAB2_EXPORT_COLUMNS, col_vars) if v.get()]
+            if not selected:
+                messagebox.showwarning("No columns", "Select at least one column to export.", parent=dlg)
+                return
+            try:
+                partner_pct = max(0, min(50, float((partner_var.get() or "0").strip() or 0)))
+            except (ValueError, TypeError):
+                partner_pct = 0.0
+            dlg.destroy()
+            path = filedialog.asksaveasfilename(
+                defaultextension=".xlsx",
+                filetypes=[("Excel workbook", "*.xlsx")],
+            )
+            if path:
+                self._do_export_tab2_to_xlsx(path, selected, partner_pct)
+
+        btn_f = ttk.Frame(main_f)
+        btn_f.grid(row=3 + (len(TAB2_EXPORT_COLUMNS) + 2) // 3, column=0, columnspan=3, pady=(8, 0))
+        ttk.Button(btn_f, text="Export…", command=do_export).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(btn_f, text="Cancel", command=dlg.destroy).pack(side=tk.LEFT)
+
+    def _do_export_tab2_to_xlsx(self, path: str, columns_to_include: list[str], partner_discount: float):
         from openpyxl import Workbook
         from openpyxl.styles import PatternFill
 
         rows = getattr(self, "_tab2_displayed_rows", None) or []
         if not rows:
-            messagebox.showwarning("Nothing to export", "Fetch on-sale list and apply filters first.")
             return
-        path = filedialog.asksaveasfilename(
-            defaultextension=".xlsx",
-            filetypes=[("Excel workbook", "*.xlsx")],
-        )
-        if not path:
-            return
-
-        wb = Workbook()
-        ws = wb.active
-        ws.title = "Deal Finder"
-        headers = ["Game", "Rating", "Reviews", "% Off", "Price", "Release date", "Sale end", "Developer", "Publisher", "Tags"]
-        for col, h in enumerate(headers, start=1):
-            ws.cell(row=1, column=col, value=h)
-
         currency = (self.tab2_currency_var.get() or "USD").strip() or "USD"
         try:
             coupon = max(0, min(50, float((self.tab2_coupon_var.get() or "0").strip() or 0)))
         except (ValueError, TypeError):
             coupon = 0.0
-        rating_vals, review_vals, discount_vals, price_vals = [], [], [], []
-        data_rows = []
+
+        # Build full row dicts (all 12 columns) and value lists for colored columns
+        rating_vals, review_vals, discount_vals, partner_discount_vals, price_vals, partner_price_vals = [], [], [], [], [], []
+        row_dicts = []
         for r in rows:
             title = (r.get("title") or "").strip() or "—"
             pct = r.get("steam_percent_positive")
@@ -1874,6 +1917,10 @@ class Application:
             discount_str = f"{dp}%" if dp is not None else ""
             price_val = _price_after_coupon(r, currency, coupon)
             price_str = f"{price_val:.2f}" if price_val is not None else "—"
+            pdp = _discount_pct_after_coupon(r, currency, partner_discount)
+            partner_discount_str = f"{pdp}%" if pdp is not None else ""
+            partner_price_val = _price_after_coupon(r, currency, partner_discount)
+            partner_price_str = f"{partner_price_val:.2f}" if partner_price_val is not None else "—"
             release_str = _release_date_str(r)
             sale_end_str = _sale_end_str(r)
             developer_str = (r.get("steam_developer") or "").strip() or "—"
@@ -1883,39 +1930,62 @@ class Application:
                 tags_str = ", ".join(str(t).strip() for t in tags_raw if t and str(t).strip()) or "—"
             else:
                 tags_str = (tags_raw or "").strip() or "—"
-            data_rows.append([title, rating, reviews_str, discount_str, price_str, release_str, sale_end_str, developer_str, publisher_str, tags_str])
+            row_dicts.append({
+                "Game": title, "Rating": rating, "Reviews": reviews_str,
+                "% Off": discount_str, "Partner % Off": partner_discount_str,
+                "Price": price_str, "Partner Price": partner_price_str,
+                "Release date": release_str, "Sale end": sale_end_str,
+                "Developer": developer_str, "Publisher": publisher_str, "Tags": tags_str,
+            })
             rating_vals.append(float(pct) if pct is not None else None)
             rev = r.get("steam_total_reviews")
             review_vals.append(math.log10(max(1, rev)) if rev and rev > 0 else None)
             discount_vals.append(float(dp) if dp is not None else None)
+            partner_discount_vals.append(float(pdp) if pdp is not None else None)
             price_vals.append(price_val if price_val is not None else None)
+            partner_price_vals.append(partner_price_val if partner_price_val is not None else None)
 
-        for i, row_data in enumerate(data_rows):
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Deal Finder"
+        for col, h in enumerate(columns_to_include, start=1):
+            ws.cell(row=1, column=col, value=h)
+        n = len(rows)
+        for i, row_dict in enumerate(row_dicts):
             excel_row = i + 2
-            for col, val in enumerate(row_data, start=1):
+            for col, col_name in enumerate(columns_to_include, start=1):
+                val = row_dict.get(col_name, "")
                 cell = ws.cell(row=excel_row, column=col, value=val)
                 row_fill = "FFFFFF" if (i % 2) == 0 else "F0F4F8"
                 cell.fill = PatternFill(start_color=row_fill, end_color=row_fill, fill_type="solid")
 
-        n = len(rows)
-        for col_idx, vals in enumerate([rating_vals, review_vals, discount_vals, price_vals]):
+        # Color scale: same logic as sheet. Rating, Reviews, % Off, Partner % Off = (v-lo)/span; Price, Partner Price = (hi-v)/span
+        colored = [
+            ("Rating", rating_vals, False),
+            ("Reviews", review_vals, False),
+            ("% Off", discount_vals, False),
+            ("Partner % Off", partner_discount_vals, False),
+            ("Price", price_vals, True),
+            ("Partner Price", partner_price_vals, True),
+        ]
+        for col_name, vals, invert in colored:
+            if col_name not in columns_to_include:
+                continue
             numeric = [v for v in vals if v is not None]
             if not numeric:
                 continue
             lo, hi = min(numeric), max(numeric)
             span = hi - lo if hi > lo else 1.0
-            excel_col = col_idx + 2
+            excel_col = 1 + columns_to_include.index(col_name)
             for row_idx in range(n):
                 v = vals[row_idx]
                 if v is None:
                     continue
-                # Price (col 4): invert so lower price = red, higher price = green
-                t = (hi - v) / span if col_idx == 3 else (v - lo) / span
+                t = (hi - v) / span if invert else (v - lo) / span
                 color = self._value_to_color(t).lstrip("#")
                 ws.cell(row=row_idx + 2, column=excel_col).fill = PatternFill(
                     start_color=color, end_color=color, fill_type="solid"
                 )
-
         wb.save(path)
         messagebox.showinfo("Exported", f"Saved to {path}")
 
