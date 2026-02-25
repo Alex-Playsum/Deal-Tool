@@ -8,6 +8,7 @@ import random
 import re
 import sys
 import threading
+import time
 import webbrowser
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -190,6 +191,84 @@ def _ensure_steam_reviews_for_email(pool: list[dict]) -> None:
             g["steam_percent_positive"] = None
         g["steam_review_desc"] = (summary.get("review_score_desc") or "").strip() or None
         g["steam_total_reviews"] = total_reviews
+
+
+def _post_header_image_url(game: dict) -> str:
+    """Return Steam header image URL for a game, or feed cover_image fallback."""
+    app_id = game.get("steam_app_id")
+    if app_id is not None:
+        try:
+            from steam_appdetails_cache import get_capsule_url
+            from steam_images import get_steam_capsule_url
+            cached = get_capsule_url(app_id, "header")
+            if cached:
+                return cached
+            return get_steam_capsule_url(app_id, "header")
+        except Exception:
+            pass
+    return (game.get("cover_image") or "").strip() or ""
+
+
+def _post_build_worker(worker_queue: queue.Queue, index: dict, params: dict) -> None:
+    """Run in background: build game pool, then build list of post records. Puts (done|error) on queue."""
+    def put(msg):
+        worker_queue.put(msg)
+    try:
+        put(("progress", "post", "Getting game pool…"))
+        source = (params.get("source") or "auto").strip() or "auto"
+        currency = (params.get("currency") or "USD").strip() or "USD"
+        try:
+            coupon = max(0, min(50, float((params.get("coupon") or "0").strip() or 0)))
+        except (ValueError, TypeError):
+            coupon = 0.0
+        if source == "list":
+            urls = parse_pasted_urls(params.get("urls_text") or "")
+            products, _ = resolve_urls_to_products(index, urls)
+            pool = list(products)
+        else:
+            products = get_on_sale_products(index, resolve_steam_by_name=True)
+            pool = enrich_with_steam_reviews(products, progress_callback=None)
+            pool = apply_deal_filters(
+                pool,
+                score_type=params.get("score_type") or "All",
+                score_value=params.get("score_value") or "",
+                label_value=params.get("label_value") or "",
+                min_reviews=params.get("min_reviews") or "",
+                discount_value=params.get("discount_value") or "",
+                price_value=params.get("price_value") or "",
+                currency=currency,
+                sale_end_type=params.get("sale_end_type") or "All",
+                sale_end_value=params.get("sale_end_value") or "",
+            )
+            pool = _apply_publisher_filter(pool, params.get("publisher") or "")
+            pool = _apply_developer_filter(pool, params.get("developer") or "")
+            pool = _apply_tags_filter(pool, params.get("tags") or "")
+            # When auto-pick: use weighted sampling to choose N games from the full filtered pool
+            try:
+                max_games = max(1, min(50, int(float((params.get("max_games") or "5").strip() or 5))))
+            except (ValueError, TypeError):
+                max_games = 5
+            n = min(max_games, len(pool))
+            pool = _weighted_sample(pool, n, _game_pick_score)
+        put(("progress", "post", f"Building {len(pool)} posts…"))
+        posts = []
+        for g in pool:
+            title = (g.get("title") or "").strip() or "—"
+            link = (g.get("link") or "").strip() or ""
+            discount_pct = _discount_pct_after_coupon(g, currency, coupon)
+            discount_str = f"{discount_pct}%" if discount_pct is not None else "N/A"
+            header_url = _post_header_image_url(g)
+            post_text = f"🚨 DEAL ALERT 🚨 Save {discount_str} on {title}\n\n{link}\n\n#PlaysumDeals"
+            posts.append({
+                "title": title,
+                "link": link,
+                "discount_pct": discount_str,
+                "header_image_url": header_url,
+                "post_text": post_text,
+            })
+        put(("done", "post_build", (posts, f"Generated {len(posts)} posts.")))
+    except Exception as e:
+        put(("error", "post_build", e))
 
 
 def _format_offer_ends_est(ms: int | None) -> str:
@@ -521,6 +600,9 @@ class Application:
         self._index = None
         self._on_sale_rows = []  # Enriched on-sale list for tab 2
         self._tab2_displayed_rows = []  # Last rows shown (for Copy URLs)
+        self._post_builder_displayed_rows = []  # Generated posts for Post Builder tab
+        self._post_auto_last_run = 0.0  # For interval-based auto-generation
+        self._post_append_mode = False  # True when auto-tick run: append generated posts
         self._worker_queue = queue.Queue()
         self._worker_busy = False
         self._build_ui()
@@ -799,6 +881,300 @@ class Application:
         ttk.Label(tab3, textvariable=self.email_status_var).pack(anchor=tk.W)
         self._email_last_html = ""
         self._email_last_block_games = None
+
+        # --- Tab 4: Post Builder ---
+        tab4 = ttk.Frame(notebook, padding=10)
+        notebook.add(tab4, text="Post Builder")
+
+        ttk.Label(tab4, text="Create deal posts for social media (discount %, title, image, link, #PlaysumDeals).").pack(anchor=tk.W)
+        # Auto-generation
+        auto_frame = ttk.Frame(tab4)
+        auto_frame.pack(fill=tk.X, pady=(8, 4))
+        self.post_auto_enabled_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(auto_frame, text="Enable automatic post generation", variable=self.post_auto_enabled_var, command=self._post_toggle_auto_ui).pack(side=tk.LEFT, padx=(0, 16))
+        self.post_auto_options_frame = ttk.Frame(auto_frame)
+        self.post_auto_options_frame.pack(side=tk.LEFT)
+        ttk.Label(self.post_auto_options_frame, text="Run every:").pack(side=tk.LEFT, padx=(0, 4))
+        self.post_interval_hours_var = tk.StringVar(value="6")
+        self.post_interval_spin = ttk.Spinbox(self.post_auto_options_frame, from_=1, to=24, width=4, textvariable=self.post_interval_hours_var)
+        self.post_interval_spin.pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Label(self.post_auto_options_frame, text="hours").pack(side=tk.LEFT, padx=(0, 12))
+        self._post_toggle_auto_ui()
+
+        # Game source
+        post_top = ttk.Frame(tab4)
+        post_top.pack(fill=tk.X, pady=(8, 4))
+        ttk.Label(post_top, text="Game source:").grid(row=0, column=0, sticky=tk.W, padx=(0, 8))
+        self.post_source_var = tk.StringVar(value="auto")
+        ttk.Radiobutton(post_top, text="Auto-pick by criteria", variable=self.post_source_var, value="auto").grid(row=0, column=1, sticky=tk.W, padx=(0, 16))
+        ttk.Radiobutton(post_top, text="Use my list (URLs below)", variable=self.post_source_var, value="list").grid(row=0, column=2, sticky=tk.W)
+        ttk.Label(tab4, text="Product URLs (when using list):").pack(anchor=tk.W, pady=(4, 0))
+        self.post_urls_text = scrolledtext.ScrolledText(tab4, height=3, width=70, wrap=tk.WORD)
+        self.post_urls_text.pack(fill=tk.X, pady=(0, 8))
+
+        # Criteria (auto-pick) - compact, same as Email Builder
+        ttk.Label(tab4, text="Criteria (auto-pick): Score, min reviews, % off, sale end").pack(anchor=tk.W, pady=(8, 4))
+        post_crit = ttk.Frame(tab4)
+        post_crit.pack(fill=tk.X)
+        ttk.Label(post_crit, text="Score:").grid(row=0, column=0, sticky=tk.W, padx=(0, 4))
+        self.post_score_type = tk.StringVar(value="All")
+        post_score_combo = ttk.Combobox(post_crit, textvariable=self.post_score_type, width=10, state="readonly")
+        post_score_combo["values"] = ("All", "Exact %", "Operator", "Label")
+        post_score_combo.grid(row=0, column=1, sticky=tk.W, padx=(0, 4))
+        self.post_score_value = tk.StringVar(value="")
+        ttk.Entry(post_crit, textvariable=self.post_score_value, width=8).grid(row=0, column=2, sticky=tk.W, padx=(0, 8))
+        self.post_label_value = tk.StringVar(value=STEAM_LABEL_ORDER[0] if STEAM_LABEL_ORDER else "")
+        post_label_combo = ttk.Combobox(post_crit, textvariable=self.post_label_value, width=18, state="readonly")
+        post_label_combo["values"] = tuple(STEAM_LABEL_ORDER)
+        post_label_combo.grid(row=0, column=3, sticky=tk.W, padx=(0, 8))
+        ttk.Label(post_crit, text="Min rev:").grid(row=0, column=4, sticky=tk.W, padx=(8, 4))
+        self.post_min_reviews = tk.StringVar(value="")
+        ttk.Entry(post_crit, textvariable=self.post_min_reviews, width=6).grid(row=0, column=5, sticky=tk.W, padx=(0, 8))
+        ttk.Label(post_crit, text="% off:").grid(row=0, column=6, sticky=tk.W, padx=(8, 4))
+        self.post_discount_value = tk.StringVar(value="")
+        ttk.Entry(post_crit, textvariable=self.post_discount_value, width=8).grid(row=0, column=7, sticky=tk.W, padx=(0, 4))
+        ttk.Label(post_crit, text="Sale end:").grid(row=0, column=8, sticky=tk.W, padx=(8, 4))
+        self.post_sale_end_type = tk.StringVar(value="All")
+        post_sale_end_combo = ttk.Combobox(post_crit, textvariable=self.post_sale_end_type, width=12, state="readonly")
+        post_sale_end_combo["values"] = ("All", "Ending Soon", "Ending Latest", "By date")
+        post_sale_end_combo.grid(row=0, column=9, sticky=tk.W, padx=(0, 4))
+        self.post_sale_end_value = tk.StringVar(value="")
+        ttk.Entry(post_crit, textvariable=self.post_sale_end_value, width=14).grid(row=0, column=10, sticky=tk.W)
+        ttk.Label(post_crit, text="Publisher:").grid(row=1, column=0, sticky=tk.W, padx=(0, 4), pady=(8, 0))
+        self.post_publisher_var = tk.StringVar(value="")
+        ttk.Entry(post_crit, textvariable=self.post_publisher_var, width=14).grid(row=1, column=1, sticky=tk.W, padx=(0, 8), pady=(8, 0))
+        ttk.Label(post_crit, text="Developer:").grid(row=1, column=2, sticky=tk.W, padx=(8, 4), pady=(8, 0))
+        self.post_developer_var = tk.StringVar(value="")
+        ttk.Entry(post_crit, textvariable=self.post_developer_var, width=14).grid(row=1, column=3, sticky=tk.W, padx=(0, 8), pady=(8, 0))
+        ttk.Label(post_crit, text="Tags:").grid(row=1, column=4, sticky=tk.W, padx=(8, 4), pady=(8, 0))
+        self.post_tags_var = tk.StringVar(value="")
+        ttk.Entry(post_crit, textvariable=self.post_tags_var, width=18).grid(row=1, column=5, sticky=tk.W, padx=(0, 8), pady=(8, 0))
+        ttk.Label(post_crit, text="Price (e.g. <6):").grid(row=1, column=6, sticky=tk.W, padx=(8, 4), pady=(8, 0))
+        self.post_price_value = tk.StringVar(value="")
+        ttk.Entry(post_crit, textvariable=self.post_price_value, width=10).grid(row=1, column=7, sticky=tk.W, padx=(0, 8), pady=(8, 0))
+
+        # Currency, coupon, and number to pick (for auto-pick only)
+        post_disp = ttk.Frame(tab4)
+        post_disp.pack(fill=tk.X, pady=(8, 4))
+        ttk.Label(post_disp, text="Currency:").grid(row=0, column=0, sticky=tk.W, padx=(0, 4))
+        self.post_currency_var = tk.StringVar(value="USD")
+        post_curr_combo = ttk.Combobox(post_disp, textvariable=self.post_currency_var, width=10, state="readonly")
+        post_curr_combo["values"] = tuple(ALL_CURRENCIES)
+        post_curr_combo.grid(row=0, column=1, sticky=tk.W, padx=(0, 16))
+        ttk.Label(post_disp, text="Coupon % off:").grid(row=0, column=2, sticky=tk.W, padx=(0, 4))
+        self.post_coupon_var = tk.StringVar(value="0")
+        ttk.Spinbox(post_disp, from_=0, to=50, width=5, textvariable=self.post_coupon_var).grid(row=0, column=3, sticky=tk.W, padx=(0, 16))
+        ttk.Label(post_disp, text="Number of games to pick (auto-pick only):").grid(row=0, column=4, sticky=tk.W, padx=(0, 4))
+        self.post_number_to_pick_var = tk.StringVar(value="5")
+        ttk.Spinbox(post_disp, from_=1, to=50, width=4, textvariable=self.post_number_to_pick_var).grid(row=0, column=5, sticky=tk.W)
+
+        # Actions
+        post_btn = ttk.Frame(tab4)
+        post_btn.pack(fill=tk.X, pady=(8, 4))
+        ttk.Button(post_btn, text="Load feed", command=self._load_feed_post_builder).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(post_btn, text="Generate posts", command=self._post_generate_manual).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(post_btn, text="Copy post text", command=self._post_copy_selected_text).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(post_btn, text="Copy image URL", command=self._post_copy_selected_image_url).pack(side=tk.LEFT)
+        self.post_status_var = tk.StringVar(value="")
+        ttk.Label(tab4, textvariable=self.post_status_var).pack(anchor=tk.W)
+
+        # Table
+        ttk.Label(tab4, text="Generated posts:").pack(anchor=tk.W, pady=(8, 4))
+        self.tab4_sheet_frame = ttk.Frame(tab4)
+        self.tab4_sheet_frame.pack(fill=tk.BOTH, expand=True)
+        self.tab4_sheet_frame.grid_rowconfigure(0, weight=1)
+        self.tab4_sheet_frame.grid_columnconfigure(0, weight=1)
+        self.tab4_sheet = Sheet(
+            self.tab4_sheet_frame,
+            headers=["Game", "Discount %", "Product link", "Image URL", "Post text"],
+            show_row_index=False,
+            show_x_scrollbar=True,
+            show_y_scrollbar=True,
+            height=300,
+            default_column_width=80,
+        )
+        self.tab4_sheet.grid(row=0, column=0, sticky="nsew")
+        self._tab4_column_ratios = [20, 8, 18, 18, 36]
+        self.tab4_sheet.enable_bindings()
+        self.tab4_sheet.bind("<Double-1>", self._on_tab4_sheet_double_click)
+        self.tab4_sheet_frame.bind("<Configure>", lambda e: self._resize_tab4_columns())
+        self.root.after(100, self._resize_tab4_columns)
+
+    def _post_toggle_auto_ui(self):
+        """Show or hide auto-generation options based on checkbox."""
+        if self.post_auto_enabled_var.get():
+            self.post_interval_spin.config(state=tk.NORMAL)
+            self._post_schedule_next_tick()
+        else:
+            self.post_interval_spin.config(state=tk.DISABLED)
+
+    def _load_feed_post_builder(self):
+        if self._index is None:
+            self._load_feed()
+        else:
+            messagebox.showinfo("Feed", "Feed already loaded.")
+
+    def _post_generate_manual(self):
+        if self._worker_busy:
+            messagebox.showwarning("Please wait", "Another operation is in progress.")
+            return
+        if self._index is None:
+            messagebox.showwarning("Load feed first", "Load the feed first (Load feed button).")
+            return
+        self.post_status_var.set("Building…")
+        self._worker_busy = True
+        self.root.after(50, self._process_worker_queue)
+        params = {
+            "source": self.post_source_var.get(),
+            "urls_text": self.post_urls_text.get("1.0", tk.END),
+            "score_type": self.post_score_type.get(),
+            "score_value": self.post_score_value.get(),
+            "label_value": self.post_label_value.get(),
+            "min_reviews": self.post_min_reviews.get(),
+            "discount_value": self.post_discount_value.get(),
+            "price_value": self.post_price_value.get(),
+            "sale_end_type": self.post_sale_end_type.get(),
+            "sale_end_value": self.post_sale_end_value.get(),
+            "publisher": self.post_publisher_var.get(),
+            "developer": self.post_developer_var.get(),
+            "tags": self.post_tags_var.get(),
+            "currency": (self.post_currency_var.get() or "USD").strip() or "USD",
+            "coupon": self.post_coupon_var.get(),
+            "max_games": self.post_number_to_pick_var.get(),
+        }
+        threading.Thread(target=lambda: _post_build_worker(self._worker_queue, self._index, params), daemon=True).start()
+
+    def _populate_post_builder_sheet(self, rows: list[dict]):
+        """Fill the Post Builder table with post records."""
+        data = []
+        for r in rows:
+            title = r.get("title") or "—"
+            discount = r.get("discount_pct") or "—"
+            link = (r.get("link") or "").strip()
+            link_display = (link[:40] + "…") if len(link) > 40 else link
+            img = (r.get("header_image_url") or "").strip()
+            img_display = (img[:40] + "…") if len(img) > 40 else img
+            post_preview = (r.get("post_text") or "").strip()
+            post_display = (post_preview[:60] + "…") if len(post_preview) > 60 else post_preview
+            data.append([title, discount, link_display, img_display, post_display])
+        self.tab4_sheet.set_sheet_data(data)
+        self._resize_tab4_columns()
+        self.tab4_sheet.refresh()
+
+    def _resize_tab4_columns(self):
+        """Set column widths by ratio for tab4 sheet."""
+        try:
+            w = self.tab4_sheet_frame.winfo_width()
+            if w <= 1:
+                w = 600
+            scrollbar_w = 20
+            total = max(100, w - scrollbar_w)
+            total_ratio = sum(self._tab4_column_ratios)
+            widths = [max(40, int(total * r / total_ratio)) for r in self._tab4_column_ratios]
+            self.tab4_sheet.set_column_widths(column_widths=widths)
+        except (tk.TclError, AttributeError):
+            pass
+
+    def _on_tab4_sheet_double_click(self, event=None):
+        """Open the selected row's product link in the browser."""
+        if not self._post_builder_displayed_rows:
+            return
+        sel = self.tab4_sheet.get_currently_selected()
+        if sel is None:
+            return
+        row_idx = sel.row
+        if 0 <= row_idx < len(self._post_builder_displayed_rows):
+            link = self._post_builder_displayed_rows[row_idx].get("link")
+            if link:
+                webbrowser.open(link)
+
+    def _post_copy_selected_text(self):
+        """Copy post text of the selected row to clipboard."""
+        row = self._post_get_selected_post_row()
+        if row is None:
+            messagebox.showinfo("Copy", "Select a row first.")
+            return
+        text = row.get("post_text") or ""
+        if text:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text)
+            self.post_status_var.set("Copied post text to clipboard.")
+        else:
+            self.post_status_var.set("")
+
+    def _post_copy_selected_image_url(self):
+        """Copy image URL of the selected row to clipboard."""
+        row = self._post_get_selected_post_row()
+        if row is None:
+            messagebox.showinfo("Copy", "Select a row first.")
+            return
+        url = (row.get("header_image_url") or "").strip()
+        if url:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(url)
+            self.post_status_var.set("Copied image URL to clipboard.")
+        else:
+            self.post_status_var.set("")
+
+    def _post_get_selected_post_row(self) -> dict | None:
+        """Return the post record for the currently selected table row, or None."""
+        if not self._post_builder_displayed_rows:
+            return None
+        sel = self.tab4_sheet.get_currently_selected()
+        if sel is None:
+            return None
+        row_idx = sel.row
+        if 0 <= row_idx < len(self._post_builder_displayed_rows):
+            return self._post_builder_displayed_rows[row_idx]
+        return None
+
+    def _post_schedule_next_tick(self):
+        """Schedule the next auto-generation check in 60 seconds."""
+        if self.post_auto_enabled_var.get():
+            self.root.after(60_000, self._post_auto_tick)
+
+    def _post_auto_tick(self):
+        """Check if interval has elapsed; if so, run auto-generation and append posts."""
+        if not self.post_auto_enabled_var.get():
+            return
+        try:
+            interval_hours = max(1, min(24, int(float((self.post_interval_hours_var.get() or "6").strip() or 6))))
+        except (ValueError, TypeError):
+            interval_hours = 6
+        now = time.time()
+        if now - self._post_auto_last_run >= interval_hours * 3600:
+            self._post_auto_last_run = now
+            if self._index is None:
+                self._load_feed()
+                self._post_schedule_next_tick()
+                return
+            if self._worker_busy:
+                self._post_schedule_next_tick()
+                return
+            self._post_append_mode = True
+            self._worker_busy = True
+            self.post_status_var.set("Auto-generating posts…")
+            self.root.after(50, self._process_worker_queue)
+            params = {
+                "source": self.post_source_var.get(),
+                "urls_text": self.post_urls_text.get("1.0", tk.END),
+                "score_type": self.post_score_type.get(),
+                "score_value": self.post_score_value.get(),
+                "label_value": self.post_label_value.get(),
+                "min_reviews": self.post_min_reviews.get(),
+                "discount_value": self.post_discount_value.get(),
+                "price_value": self.post_price_value.get(),
+                "sale_end_type": self.post_sale_end_type.get(),
+                "sale_end_value": self.post_sale_end_value.get(),
+                "publisher": self.post_publisher_var.get(),
+                "developer": self.post_developer_var.get(),
+                "tags": self.post_tags_var.get(),
+                "currency": (self.post_currency_var.get() or "USD").strip() or "USD",
+                "coupon": self.post_coupon_var.get(),
+                "max_games": self.post_number_to_pick_var.get(),
+            }
+            threading.Thread(target=lambda: _post_build_worker(self._worker_queue, self._index, params), daemon=True).start()
+        self._post_schedule_next_tick()
 
     def _email_block_label(self, block: dict) -> str:
         btype = (block.get("type") or "").strip()
@@ -1610,6 +1986,8 @@ class Application:
                     self.tab2_status.config(text=text)
                 elif target == "email":
                     self.email_status_var.set(text)
+                elif target == "post":
+                    self.post_status_var.set(text)
             elif kind == "done":
                 _, op, payload = msg
                 if op == "load_feed":
@@ -1647,6 +2025,17 @@ class Application:
                                     if games and (games[0].get("link") or "").strip():
                                         cfg["override_url"] = (games[0].get("link") or "").strip()
                         self._email_last_block_games = block_games
+                elif op == "post_build":
+                    posts, status_msg = payload[0], payload[1]
+                    if getattr(self, "_post_append_mode", False):
+                        self._post_builder_displayed_rows.extend(posts)
+                        self._populate_post_builder_sheet(self._post_builder_displayed_rows)
+                        self.post_status_var.set(f"Auto-added {len(posts)} posts. Total: {len(self._post_builder_displayed_rows)}.")
+                        self._post_append_mode = False
+                    else:
+                        self._post_builder_displayed_rows = posts
+                        self._populate_post_builder_sheet(posts)
+                        self.post_status_var.set(status_msg)
                 self._worker_busy = False
             elif kind == "error":
                 _, op, e = msg
@@ -1660,6 +2049,11 @@ class Application:
                     messagebox.showerror("Error", f"Failed:\n{e}")
                 elif op == "email_build":
                     self.email_status_var.set("")
+                    messagebox.showerror("Error", str(e))
+                    import traceback
+                    traceback.print_exc()
+                elif op == "post_build":
+                    self.post_status_var.set("")
                     messagebox.showerror("Error", str(e))
                     import traceback
                     traceback.print_exc()
