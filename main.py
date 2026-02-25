@@ -62,6 +62,7 @@ from steam_appdetails_cache import clear as clear_steam_appdetails_cache
 from steamspy_client import clear_steamspy_cache
 from email_html import build_email_html
 from steam_client import fetch_app_details_full, fetch_app_reviews
+from trello_client import send_posts_to_trello
 
 # Directory for saved email templates (one JSON file per template)
 EMAIL_TEMPLATES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "email_templates")
@@ -259,12 +260,26 @@ def _post_build_worker(worker_queue: queue.Queue, index: dict, params: dict) -> 
             discount_str = f"{discount_pct}%" if discount_pct is not None else "N/A"
             header_url = _post_header_image_url(g)
             post_text = f"🚨 DEAL ALERT 🚨 Save {discount_str} on {title}\n\n{link}\n\n#PlaysumDeals"
+            pct = g.get("steam_percent_positive")
+            desc = (g.get("steam_review_desc") or "").strip()
+            if pct is not None and desc:
+                rating_str = f"{desc} ({pct}%)"
+            elif desc:
+                rating_str = desc
+            elif pct is not None:
+                rating_str = f"{pct}%"
+            else:
+                rating_str = "—"
+            reviews_val = g.get("steam_total_reviews")
+            reviews_str = str(reviews_val) if reviews_val is not None and reviews_val > 0 else "—"
             posts.append({
                 "title": title,
                 "link": link,
                 "discount_pct": discount_str,
                 "header_image_url": header_url,
                 "post_text": post_text,
+                "rating": rating_str,
+                "reviews": reviews_str,
             })
         put(("done", "post_build", (posts, f"Generated {len(posts)} posts.")))
     except Exception as e:
@@ -964,7 +979,7 @@ class Application:
         ttk.Label(post_disp, text="Coupon % off:").grid(row=0, column=2, sticky=tk.W, padx=(0, 4))
         self.post_coupon_var = tk.StringVar(value="0")
         ttk.Spinbox(post_disp, from_=0, to=50, width=5, textvariable=self.post_coupon_var).grid(row=0, column=3, sticky=tk.W, padx=(0, 16))
-        ttk.Label(post_disp, text="Number of games to pick (auto-pick only):").grid(row=0, column=4, sticky=tk.W, padx=(0, 4))
+        ttk.Label(post_disp, text="Games count:").grid(row=0, column=4, sticky=tk.W, padx=(0, 4))
         self.post_number_to_pick_var = tk.StringVar(value="5")
         ttk.Spinbox(post_disp, from_=1, to=50, width=4, textvariable=self.post_number_to_pick_var).grid(row=0, column=5, sticky=tk.W)
 
@@ -986,7 +1001,7 @@ class Application:
         self.tab4_sheet_frame.grid_columnconfigure(0, weight=1)
         self.tab4_sheet = Sheet(
             self.tab4_sheet_frame,
-            headers=["Game", "Discount %", "Product link", "Image URL", "Post text"],
+            headers=["Game", "Rating", "Reviews", "Discount %", "Product link", "Image URL", "Post text"],
             show_row_index=False,
             show_x_scrollbar=True,
             show_y_scrollbar=True,
@@ -994,11 +1009,14 @@ class Application:
             default_column_width=80,
         )
         self.tab4_sheet.grid(row=0, column=0, sticky="nsew")
-        self._tab4_column_ratios = [20, 8, 18, 18, 36]
+        self._tab4_column_ratios = [18, 12, 8, 8, 14, 14, 26]
         self.tab4_sheet.enable_bindings()
         self.tab4_sheet.bind("<Double-1>", self._on_tab4_sheet_double_click)
         self.tab4_sheet_frame.bind("<Configure>", lambda e: self._resize_tab4_columns())
         self.root.after(100, self._resize_tab4_columns)
+        post_btn_under = ttk.Frame(tab4)
+        post_btn_under.pack(anchor=tk.W, pady=(8, 0))
+        ttk.Button(post_btn_under, text="Send to Trello", command=self._post_show_send_to_trello_dialog).pack(side=tk.LEFT, padx=(0, 8))
 
     def _post_toggle_auto_ui(self):
         """Show or hide auto-generation options based on checkbox."""
@@ -1049,6 +1067,8 @@ class Application:
         data = []
         for r in rows:
             title = r.get("title") or "—"
+            rating = r.get("rating") or "—"
+            reviews = r.get("reviews") or "—"
             discount = r.get("discount_pct") or "—"
             link = (r.get("link") or "").strip()
             link_display = (link[:40] + "…") if len(link) > 40 else link
@@ -1056,7 +1076,7 @@ class Application:
             img_display = (img[:40] + "…") if len(img) > 40 else img
             post_preview = (r.get("post_text") or "").strip()
             post_display = (post_preview[:60] + "…") if len(post_preview) > 60 else post_preview
-            data.append([title, discount, link_display, img_display, post_display])
+            data.append([title, rating, reviews, discount, link_display, img_display, post_display])
         self.tab4_sheet.set_sheet_data(data)
         self._resize_tab4_columns()
         self.tab4_sheet.refresh()
@@ -1127,6 +1147,79 @@ class Application:
         if 0 <= row_idx < len(self._post_builder_displayed_rows):
             return self._post_builder_displayed_rows[row_idx]
         return None
+
+    def _post_show_send_to_trello_dialog(self):
+        """Open a dialog with checkboxes to select which posts to send to Trello, then send them."""
+        if not self._post_builder_displayed_rows:
+            messagebox.showinfo("Send to Trello", "No posts to send. Generate posts first.")
+            return
+        win = tk.Toplevel(self.root)
+        win.title("Select posts to send to Trello")
+        win.transient(self.root)
+        win.grab_set()
+        ttk.Label(win, text="Select the posts to send to the Deal Alerts list on your Trello board:").pack(anchor=tk.W, padx=10, pady=(10, 6))
+        canvas_container = ttk.Frame(win)
+        canvas_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 8))
+        canvas = tk.Canvas(canvas_container, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(canvas_container)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        canvas.config(yscrollcommand=scrollbar.set)
+        scrollbar.config(command=canvas.yview)
+        inner = ttk.Frame(canvas)
+        canvas_window = canvas.create_window((0, 0), window=inner, anchor=tk.NW)
+        def _on_frame_configure():
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        def _on_canvas_configure(event):
+            canvas.itemconfig(canvas_window, width=event.width)
+        inner.bind("<Configure>", lambda e: _on_frame_configure())
+        canvas.bind("<Configure>", _on_canvas_configure)
+        vars_and_posts: list[tuple[tk.BooleanVar, dict]] = []
+        for post in self._post_builder_displayed_rows:
+            title = (post.get("title") or "").strip() or "Untitled"
+            var = tk.BooleanVar(value=True)
+            vars_and_posts.append((var, post))
+            cb = ttk.Checkbutton(inner, text=title[:80] + ("…" if len(title) > 80 else ""), variable=var)
+            cb.pack(anchor=tk.W)
+        def select_all():
+            for v, _ in vars_and_posts:
+                v.set(True)
+        def deselect_all():
+            for v, _ in vars_and_posts:
+                v.set(False)
+        def send():
+            selected = [p for v, p in vars_and_posts if v.get()]
+            if not selected:
+                messagebox.showwarning("Send to Trello", "Select at least one post.", parent=win)
+                return
+            win.grab_release()
+            win.destroy()
+            self.post_status_var.set("Sending to Trello…")
+            self.root.update_idletasks()
+            result_queue = queue.Queue()
+            def work():
+                n, err = send_posts_to_trello(selected)
+                result_queue.put((n, err))
+            threading.Thread(target=work, daemon=True).start()
+            def on_done():
+                try:
+                    n, err = result_queue.get_nowait()
+                except queue.Empty:
+                    self.root.after(100, on_done)
+                    return
+                if err:
+                    self.post_status_var.set("")
+                    messagebox.showerror("Send to Trello", err)
+                else:
+                    self.post_status_var.set(f"Sent {n} card(s) to Trello (Deal Alerts).")
+                    messagebox.showinfo("Send to Trello", f"Sent {n} card(s) to the Deal Alerts list.")
+            self.root.after(100, on_done)
+        btn_row = ttk.Frame(win)
+        btn_row.pack(fill=tk.X, padx=10, pady=(0, 10))
+        ttk.Button(btn_row, text="Select all", command=select_all).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(btn_row, text="Deselect all", command=deselect_all).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(btn_row, text="Send to Trello", command=send).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(btn_row, text="Cancel", command=win.destroy).pack(side=tk.LEFT)
 
     def _post_schedule_next_tick(self):
         """Schedule the next auto-generation check in 60 seconds."""

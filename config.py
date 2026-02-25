@@ -78,3 +78,14 @@ STEAM_LABEL_MIN_PERCENT = {
     "Mostly Positive": 70,
 }
 STEAM_LABEL_ORDER = ["Overwhelmingly Positive", "Very Positive", "Positive", "Mostly Positive"]
+
+# --- Trello (Post Builder: send to marketing board) ---
+# API key and token from https://trello.com/power-ups/admin ; board ID from board URL.
+try:
+    from config_local import TRELLO_API_KEY, TRELLO_TOKEN, TRELLO_BOARD_ID
+except ImportError:
+    TRELLO_API_KEY = ""
+    TRELLO_TOKEN = ""
+    TRELLO_BOARD_ID = ""
+
+TRELLO_DEAL_ALERTS_LIST_NAME = "Deal Alerts"
