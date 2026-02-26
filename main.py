@@ -2123,8 +2123,24 @@ class Application:
                     if getattr(self, "_post_append_mode", False):
                         self._post_builder_displayed_rows.extend(posts)
                         self._populate_post_builder_sheet(self._post_builder_displayed_rows)
-                        self.post_status_var.set(f"Auto-added {len(posts)} posts. Total: {len(self._post_builder_displayed_rows)}.")
+                        self.post_status_var.set(f"Auto-added {len(posts)} posts. Sending to Trello…")
                         self._post_append_mode = False
+                        trello_result_queue = queue.Queue()
+                        def _send_auto_trello():
+                            n, err = send_posts_to_trello(posts)
+                            trello_result_queue.put((n, err))
+                        threading.Thread(target=_send_auto_trello, daemon=True).start()
+                        def _on_auto_trello_done():
+                            try:
+                                n, err = trello_result_queue.get_nowait()
+                            except queue.Empty:
+                                self.root.after(100, _on_auto_trello_done)
+                                return
+                            if err:
+                                self.post_status_var.set(f"Auto-added {len(posts)} posts. Trello: {err}")
+                            else:
+                                self.post_status_var.set(f"Auto-added {len(posts)} posts. Sent {n} to Trello (Deal Alerts).")
+                        self.root.after(100, _on_auto_trello_done)
                     else:
                         self._post_builder_displayed_rows = posts
                         self._populate_post_builder_sheet(posts)
