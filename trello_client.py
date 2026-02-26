@@ -1,16 +1,21 @@
 """Trello API client for Post Builder: create cards and attach images to the Deal Alerts list."""
 
+import os
+from datetime import datetime
+
 import requests
 
 from config import (
     TRELLO_API_KEY,
     TRELLO_BOARD_ID,
     TRELLO_DEAL_ALERTS_LIST_NAME,
+    TRELLO_PARTNER_LIST_NAME,
     TRELLO_TOKEN,
 )
 
 TRELLO_BASE = "https://api.trello.com/1"
 SOCIAL_MEDIA_LABEL_NAME = "Social Media"
+PARTNER_CARD_LABELS = ["Partners", "Marketing"]
 
 
 def _auth_params():
@@ -44,6 +49,11 @@ def get_deal_alerts_list_id() -> str | None:
     Fetch lists for the configured board and return the id of the list named "Deal Alerts".
     Returns None if not configured, board not found, or list name not found.
     """
+    return get_list_id_by_name(TRELLO_DEAL_ALERTS_LIST_NAME)
+
+
+def get_list_id_by_name(list_name: str) -> str | None:
+    """Return the id of the list with the given name on the configured board, or None."""
     if not (TRELLO_API_KEY and TRELLO_TOKEN and TRELLO_BOARD_ID):
         return None
     url = f"{TRELLO_BASE}/boards/{TRELLO_BOARD_ID}/lists"
@@ -52,7 +62,7 @@ def get_deal_alerts_list_id() -> str | None:
         resp.raise_for_status()
         lists = resp.json()
         for lst in lists:
-            if (lst.get("name") or "").strip() == TRELLO_DEAL_ALERTS_LIST_NAME:
+            if (lst.get("name") or "").strip() == (list_name or "").strip():
                 return lst.get("id")
         return None
     except (requests.RequestException, KeyError, TypeError):
@@ -114,6 +124,70 @@ def add_attachment_by_url(card_id: str, image_url: str) -> bool:
         return True
     except requests.RequestException:
         return False
+
+
+def add_attachment_file(card_id: str, file_path: str) -> bool:
+    """Add a file attachment to a card. Returns True on success."""
+    if not (TRELLO_API_KEY and TRELLO_TOKEN) or not (file_path or "").strip() or not os.path.isfile(file_path):
+        return False
+    url = f"{TRELLO_BASE}/cards/{card_id}/attachments"
+    with open(file_path, "rb") as f:
+        files = {"file": (os.path.basename(file_path), f)}
+        try:
+            resp = requests.post(url, params=_auth_params(), files=files, timeout=30)
+            resp.raise_for_status()
+            return True
+        except requests.RequestException:
+            return False
+
+
+def get_or_create_label_id(label_name: str) -> str | None:
+    """Return the id of the label with the given name on the configured board; create it (green) if missing."""
+    if not (TRELLO_API_KEY and TRELLO_TOKEN and TRELLO_BOARD_ID):
+        return None
+    url = f"{TRELLO_BASE}/boards/{TRELLO_BOARD_ID}/labels"
+    try:
+        resp = requests.get(url, params=_auth_params(), timeout=15)
+        resp.raise_for_status()
+        labels = resp.json()
+        for lab in labels:
+            if (lab.get("name") or "").strip() == (label_name or "").strip():
+                return lab.get("id")
+        create_url = f"{TRELLO_BASE}/labels"
+        create_resp = requests.post(
+            create_url,
+            params={**_auth_params(), "name": label_name.strip(), "idBoard": TRELLO_BOARD_ID, "color": "green"},
+            timeout=15,
+        )
+        create_resp.raise_for_status()
+        return create_resp.json().get("id")
+    except (requests.RequestException, KeyError, TypeError):
+        return None
+
+
+def create_partner_promotions_card(file_path: str) -> tuple[bool, str | None]:
+    """
+    Create a Trello card on the "Next 🔥" list with title "Playsum Partner Promotions Sheet" + current date,
+    labels Partners and Marketing, and the given file attached.
+    Returns (True, None) on success, (False, error_message) on failure.
+    """
+    if not (TRELLO_API_KEY and TRELLO_TOKEN and TRELLO_BOARD_ID):
+        return False, "Trello not configured. Add TRELLO_API_KEY, TRELLO_TOKEN, TRELLO_BOARD_ID to config_local.py."
+    id_list = get_list_id_by_name(TRELLO_PARTNER_LIST_NAME)
+    if not id_list:
+        return False, f"List '{TRELLO_PARTNER_LIST_NAME}' not found on the configured board."
+    id_labels = []
+    for name in PARTNER_CARD_LABELS:
+        if lid := get_or_create_label_id(name):
+            id_labels.append(lid)
+    title_date = datetime.now().strftime("%Y-%m-%d")
+    name = f"Playsum Partner Promotions Sheet {title_date}"
+    card = create_card(id_list, name, "", id_labels=id_labels if id_labels else None)
+    if not card:
+        return False, "Failed to create Trello card."
+    if not add_attachment_file(card["id"], file_path):
+        return False, "Card created but failed to attach file."
+    return True, None
 
 
 def send_posts_to_trello(posts: list[dict]) -> tuple[int, str | None]:

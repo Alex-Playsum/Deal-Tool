@@ -2413,7 +2413,13 @@ class Application:
         )
         partner_var = tk.StringVar(value="10")
         partner_spin = ttk.Spinbox(main_f, from_=0, to=50, width=6, textvariable=partner_var)
-        partner_spin.grid(row=2 + (len(TAB2_EXPORT_COLUMNS) + 2) // 3, column=0, sticky=tk.W, pady=(0, 12))
+        partner_spin.grid(row=2 + (len(TAB2_EXPORT_COLUMNS) + 2) // 3, column=0, sticky=tk.W, pady=(0, 4))
+        trello_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            main_f,
+            text="Create Trello card with file attached to list \"Next 🔥\"",
+            variable=trello_var,
+        ).grid(row=3 + (len(TAB2_EXPORT_COLUMNS) + 2) // 3, column=0, columnspan=3, sticky=tk.W, pady=(8, 12))
 
         def do_export():
             selected = [name for name, v in zip(TAB2_EXPORT_COLUMNS, col_vars) if v.get()]
@@ -2430,16 +2436,16 @@ class Application:
                 filetypes=[("Excel workbook", "*.xlsx")],
             )
             if path:
-                self._do_export_tab2_to_xlsx(path, selected, partner_pct)
+                self._do_export_tab2_to_xlsx(path, selected, partner_pct, send_to_trello=trello_var.get())
 
         btn_f = ttk.Frame(main_f)
-        btn_f.grid(row=3 + (len(TAB2_EXPORT_COLUMNS) + 2) // 3, column=0, columnspan=3, pady=(8, 0))
+        btn_f.grid(row=4 + (len(TAB2_EXPORT_COLUMNS) + 2) // 3, column=0, columnspan=3, pady=(8, 0))
         ttk.Button(btn_f, text="Export…", command=do_export).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(btn_f, text="Cancel", command=dlg.destroy).pack(side=tk.LEFT)
 
-    def _do_export_tab2_to_xlsx(self, path: str, columns_to_include: list[str], partner_discount: float):
+    def _do_export_tab2_to_xlsx(self, path: str, columns_to_include: list[str], partner_discount: float, send_to_trello: bool = False):
         from openpyxl import Workbook
-        from openpyxl.styles import PatternFill
+        from openpyxl.styles import PatternFill, Alignment
 
         rows = getattr(self, "_tab2_displayed_rows", None) or []
         if not rows:
@@ -2499,17 +2505,46 @@ class Application:
             price_vals.append(price_val if price_val is not None else None)
             partner_price_vals.append(partner_price_val if partner_price_val is not None else None)
 
+        center_align = Alignment(horizontal="center")
         wb = Workbook()
         ws = wb.active
         ws.title = "Deal Finder"
         for col, h in enumerate(columns_to_include, start=1):
-            ws.cell(row=1, column=col, value=h)
+            c = ws.cell(row=1, column=col, value=h)
+            if col > 1:
+                c.alignment = center_align
         n = len(rows)
         for i, row_dict in enumerate(row_dicts):
             excel_row = i + 2
             for col, col_name in enumerate(columns_to_include, start=1):
                 val = row_dict.get(col_name, "")
-                cell = ws.cell(row=excel_row, column=col, value=val)
+                if col_name in ("% Off", "Partner % Off"):
+                    if val and val.strip().rstrip("%").strip().isdigit():
+                        cell_val = int(val.strip().rstrip("%").strip()) / 100.0
+                        cell = ws.cell(row=excel_row, column=col, value=cell_val)
+                        cell.number_format = "0%"
+                    else:
+                        cell = ws.cell(row=excel_row, column=col, value=val)
+                elif col_name in ("Price", "Partner Price"):
+                    if val and val != "—":
+                        try:
+                            cell_val = float(val)
+                            cell = ws.cell(row=excel_row, column=col, value=cell_val)
+                            cell.number_format = "0.00"
+                        except (ValueError, TypeError):
+                            cell = ws.cell(row=excel_row, column=col, value=val)
+                    else:
+                        cell = ws.cell(row=excel_row, column=col, value=val)
+                elif col_name == "Reviews":
+                    if val and val.strip().isdigit():
+                        cell = ws.cell(row=excel_row, column=col, value=int(val))
+                        cell.number_format = "0"
+                    else:
+                        cell = ws.cell(row=excel_row, column=col, value=val)
+                else:
+                    cell = ws.cell(row=excel_row, column=col, value=val)
+                if col > 1:
+                    cell.alignment = center_align
                 row_fill = "FFFFFF" if (i % 2) == 0 else "F0F4F8"
                 cell.fill = PatternFill(start_color=row_fill, end_color=row_fill, fill_type="solid")
 
@@ -2541,7 +2576,15 @@ class Application:
                     start_color=color, end_color=color, fill_type="solid"
                 )
         wb.save(path)
-        messagebox.showinfo("Exported", f"Saved to {path}")
+        if send_to_trello:
+            from trello_client import create_partner_promotions_card
+            ok, err = create_partner_promotions_card(path)
+            if ok:
+                messagebox.showinfo("Exported", f"Saved to {path}\n\nTrello card created and file attached to list \"Next 🔥\".")
+            else:
+                messagebox.showerror("Trello", err or "Failed to create Trello card.")
+        else:
+            messagebox.showinfo("Exported", f"Saved to {path}")
 
     def _clear_steam_cache(self):
         clear_steam_cache()

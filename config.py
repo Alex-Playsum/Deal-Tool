@@ -89,3 +89,4 @@ except ImportError:
     TRELLO_BOARD_ID = ""
 
 TRELLO_DEAL_ALERTS_LIST_NAME = "Deal Alerts 🚨"
+TRELLO_PARTNER_LIST_NAME = "Next 🔥"
